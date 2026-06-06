@@ -1540,6 +1540,7 @@ async function telegramHandler(msg) {
     }
     return;
   }
+  const closeMatch = text.match(/^\/close\s+(\d+)$/i);
   if (closeMatch) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
