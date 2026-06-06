@@ -25,7 +25,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { tickPaperPositions } from "./paper-positions.js";
+import { tickPaperPositions, listPaperPositions, getPaperPosition, closePaperPosition } from "./paper-positions.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -215,6 +215,14 @@ export async function runManagementCycle({ silent = false } = {}) {
     positions = livePositions?.positions || [];
 
     if (positions.length === 0) {
+      const paperPositions = getOpenPaperPositions();
+      if (process.env.DRY_RUN === "true" && paperPositions.length > 0) {
+        await tickPaperPositions().catch((e) => log("cron_error", `Paper sim tick failed during management: ${e.message}`));
+        mgmtReport = `${formatPaperPositions(getOpenPaperPositions())}
+
+Mode: DRY RUN paper simulator — live wallet has no on-chain LP position.`;
+        return mgmtReport;
+      }
       log("cron", "No open positions — triggering screening cycle");
       mgmtReport = "No open positions. Triggering screening cycle.";
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
@@ -391,14 +399,16 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
-    if (prePositions.total_positions >= config.risk.maxPositions) {
-      log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
-      screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
+    const paperOpenCount = process.env.DRY_RUN === "true" ? getOpenPaperPositions().length : 0;
+    const effectivePositionCount = Math.max(prePositions.total_positions, paperOpenCount);
+    if (effectivePositionCount >= config.risk.maxPositions) {
+      log("cron", `Screening skipped — max positions reached (${effectivePositionCount}/${config.risk.maxPositions})`);
+      screenReport = `Screening skipped — max positions reached (${effectivePositionCount}/${config.risk.maxPositions}).${paperOpenCount ? " Paper simulator position is open; use /paper to view PnL." : ""}`;
       appendDecision({
         type: "skip",
         actor: "SCREENER",
         summary: "Screening skipped",
-        reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
+        reason: `Max positions reached (${effectivePositionCount}/${config.risk.maxPositions})`,
       });
       _screeningBusy = false;
       return screenReport;
@@ -980,6 +990,22 @@ function describeLatestCandidates(limit = 5) {
   return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
 }
 
+function getOpenPaperPositions() {
+  return listPaperPositions().filter((p) => p.status === "open");
+}
+
+function formatPaperPositions(positions = listPaperPositions()) {
+  if (!positions.length) return "No paper simulator positions.";
+  const lines = positions.map((p, i) => {
+    const pnlSign = Number(p.net_pnl) >= 0 ? "+" : "";
+    const feesSign = Number(p.fees_earned) >= 0 ? "+" : "";
+    const ilSign = Number(p.il_usd) >= 0 ? "+" : "";
+    const inRange = p.in_range_pct == null ? "waiting candles" : `${p.in_range_pct}% in-range`;
+    return `${i + 1}. ${p.pair || p.pool} | ${p.status} | deposit $${Number(p.deposit ?? 0).toFixed(2)} | PnL ${pnlSign}$${Number(p.net_pnl ?? 0).toFixed(4)} | fees ${feesSign}$${Number(p.fees_earned ?? 0).toFixed(4)} | IL ${ilSign}$${Number(p.il_usd ?? 0).toFixed(4)} | ${inRange} | ${p.duration_hours}h`;
+  });
+  return `🧪 Paper Simulator Positions (${positions.length})\n\n${lines.join("\n")}`;
+}
+
 function formatWalletStatus(wallet, positions) {
   const deployAmount = computeDeployAmount(wallet.sol);
   const hive = isHiveMindEnabled() ? "on" : "off";
@@ -987,6 +1013,7 @@ function formatWalletStatus(wallet, positions) {
     `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
     `SOL price: $${wallet.sol_price}`,
     `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
+    `Paper positions: ${getOpenPaperPositions().length}/${config.risk.maxPositions}`,
     `Next deploy amount: ${deployAmount} SOL`,
     `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
     `HiveMind: ${hive}`,
@@ -1270,7 +1297,9 @@ function formatHelpText() {
     "/help — show commands",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
-    "/positions — list open positions",
+    "/positions — list open positions + paper simulator PnL",
+    "/paper — list paper simulator PnL",
+    "/paperclose <n> — close one paper simulator position",
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",
     "/closeall — close all open positions",
@@ -1447,15 +1476,44 @@ async function telegramHandler(msg) {
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
-      });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await tickPaperPositions().catch(() => {});
+      const paperPositions = listPaperPositions();
+      const sections = [];
+      if (total_positions > 0) {
+        const cur = config.management.solMode ? "◎" : "$";
+        const lines = positions.map((p, i) => {
+          const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+          const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+          const oor = !p.in_range ? " ⚠️OOR" : "";
+          return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        });
+        sections.push(`📊 Open On-chain Positions (${total_positions}):\n\n${lines.join("\n")}`);
+      }
+      if (paperPositions.length > 0) sections.push(formatPaperPositions(paperPositions));
+      if (!sections.length) { await sendMessage("No open positions and no paper simulator positions."); return; }
+      await sendMessage(`${sections.join("\n\n")}\n\n/close <n> for on-chain | /paperclose <n> for paper | /set <n> <note> for on-chain`);
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/paper") {
+    try {
+      await tickPaperPositions().catch(() => {});
+      await sendMessage(formatPaperPositions(listPaperPositions())).catch(() => {});
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  const paperCloseMatch = text.match(/^\/paperclose\s+(\d+)$/i);
+  if (paperCloseMatch) {
+    try {
+      const idx = parseInt(paperCloseMatch[1]) - 1;
+      await tickPaperPositions().catch(() => {});
+      const positions = listPaperPositions();
+      const pos = positions[idx];
+      if (!pos) { await sendMessage("Invalid number. Use /paper first."); return; }
+      const closed = closePaperPosition(pos.id);
+      await sendMessage(`✅ Closed paper position ${closed.pair || closed.pool}\nPnL: $${Number(closed.net_pnl ?? 0).toFixed(4)} | fees: $${Number(closed.fees_earned ?? 0).toFixed(4)} | IL: $${Number(closed.il_usd ?? 0).toFixed(4)}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1482,8 +1540,6 @@ async function telegramHandler(msg) {
     }
     return;
   }
-
-  const closeMatch = text.match(/^\/close\s+(\d+)$/i);
   if (closeMatch) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
@@ -1581,7 +1637,7 @@ async function telegramHandler(msg) {
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
         : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
       await sendMessage([
-        `✅ Deployed ${candidate.name}`,
+        `${result.paper_simulated ? "🧪 Paper simulated" : "✅ Deployed"} ${candidate.name}`,
         `Pool: ${candidate.pool}`,
         `Amount: ${deployAmount} SOL`,
         coverage,
