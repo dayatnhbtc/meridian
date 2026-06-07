@@ -29,7 +29,9 @@ import { getWalletBalances, normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { openPaperPosition } from "../paper-positions.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { assertLiveTradingAllowed } from "../safety.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { EVIL_PANDA_PRESET_ID, applyEvilPandaDeployDefaults } from "../evil-panda.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -96,6 +98,20 @@ function getWallet() {
     log("init", `Wallet: ${_wallet.publicKey.toString()}`);
   }
   return _wallet;
+}
+
+async function sendAndConfirmTransactionSafe(connection, transaction, signers, action) {
+  const wallet = signers?.[0]?.publicKey || null;
+  assertLiveTradingAllowed(action || "sendAndConfirmTransaction", wallet);
+  return sendAndConfirmTransaction(connection, transaction, signers);
+}
+
+export function assertPositionInWalletPositions(positionAddress, positionsResult) {
+  const positions = Array.isArray(positionsResult?.positions) ? positionsResult.positions : [];
+  if (!positions.some((position) => position.position === positionAddress)) {
+    throw new Error(`Position ${positionAddress.slice(0, 8)} not found in this wallet's open positions; refusing claim/close.`);
+  }
+  return true;
 }
 
 function shouldUseLpAgentRelay() {
@@ -200,6 +216,7 @@ async function signAndSimulateRelayTransactions(serializedTxs, wallet, {
   maxSolLoss = 0.05,
   requiredStaticAccounts = [],
 } = {}) {
+  assertLiveTradingAllowed(label ? `relay ${label}` : "relay transaction", wallet.publicKey);
   const signed = [];
   const owner = wallet.publicKey.toString();
   const allowedMints = new Set(allowedDebitMints.filter(Boolean).map(String));
@@ -455,6 +472,7 @@ export async function deployPosition({
   amount_x,
   amount_y,
   strategy,
+  strategy_preset,
   bins_below,
   bins_above,
   downside_pct,
@@ -469,6 +487,31 @@ export async function deployPosition({
   initial_value_usd,
 }) {
   pool_address = normalizeMint(pool_address);
+
+  if (strategy_preset === EVIL_PANDA_PRESET_ID) {
+    if (process.env.DRY_RUN !== "true") {
+      throw new Error("evil_panda_safe_v1 is paper-only until verified; refusing live deploy.");
+    }
+    const defaults = applyEvilPandaDeployDefaults({
+      pool_address,
+      amount_sol,
+      amount_x,
+      amount_y,
+      strategy,
+      strategy_preset,
+      bins_below,
+      bins_above,
+      downside_pct,
+      upside_pct,
+      bin_step,
+    }, config.management);
+    amount_x = defaults.amount_x;
+    amount_y = defaults.amount_y;
+    strategy = defaults.strategy;
+    bins_above = defaults.bins_above;
+    downside_pct = defaults.downside_pct;
+  }
+
   const activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
   let activeBinsAbove = bins_above ?? 0;
@@ -600,6 +643,9 @@ export async function deployPosition({
       lower_price: minPrice,
       upper_price: maxPrice,
       strategy_type: activeStrategy === "bid_ask" ? "bid-ask" : activeStrategy,
+      strategy_preset: strategy_preset ?? null,
+      entry_signal: strategy_preset === EVIL_PANDA_PRESET_ID ? "supertrend_break_above_15m" : null,
+      exit_signal: strategy_preset === EVIL_PANDA_PRESET_ID ? "rsi2_gt_90_and_bb_upper_or_macd_first_green" : null,
     });
     return {
       success: true,
@@ -609,6 +655,7 @@ export async function deployPosition({
       would_deploy: {
         pool_address,
         strategy: activeStrategy,
+        strategy_preset: strategy_preset ?? null,
         bins_below: activeBinsBelow,
         bins_above: activeBinsAbove,
         downside_pct: downside_pct ?? null,
@@ -650,6 +697,7 @@ export async function deployPosition({
   if (shouldUseLpAgentRelayForDeploy()) {
     try {
       const wallet = getWallet();
+      assertLiveTradingAllowed("relay deploy", wallet.publicKey);
       log(
         "deploy",
         `Relay deploy via Agent Meridian: ${pool_address} activeBin ${activeBin.binId} bins ${minBinId}->${maxBinId} amountY=${finalAmountY}`,
@@ -810,7 +858,7 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+        const txHash = await sendAndConfirmTransactionSafe(getConnection(), createTxArray[i], signers);
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -826,7 +874,7 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+        const txHash = await sendAndConfirmTransactionSafe(getConnection(), addTxArray[i], [wallet]);
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
@@ -840,7 +888,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendAndConfirmTransactionSafe(getConnection(), tx, [wallet, newPosition]);
       txHashes.push(txHash);
     }
 
@@ -1494,6 +1542,8 @@ export async function claimFees({ position_address }) {
   try {
     log("claim", `Claiming fees for position: ${position_address}`);
     const wallet = getWallet();
+    const ownedPositions = await getMyPositions({ force: true, silent: true });
+    assertPositionInWalletPositions(position_address, ownedPositions);
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
@@ -1511,7 +1561,7 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+      const txHash = await sendAndConfirmTransactionSafe(getConnection(), tx, [wallet]);
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -1537,6 +1587,8 @@ export async function closePosition({ position_address, reason }) {
   try {
     log("close", `Closing position: ${position_address}`);
     const wallet = getWallet();
+    const ownedPositions = await getMyPositions({ force: true, silent: true });
+    assertPositionInWalletPositions(position_address, ownedPositions);
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
     if (shouldUseLpAgentRelay()) {
@@ -1793,7 +1845,7 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+            const claimHash = await sendAndConfirmTransactionSafe(getConnection(), tx, [wallet]);
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
@@ -1832,7 +1884,7 @@ export async function closePosition({ position_address, reason }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+        const txHash = await sendAndConfirmTransactionSafe(getConnection(), tx, [wallet]);
         closeTxHashes.push(txHash);
       }
     } else {
@@ -1841,7 +1893,7 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+      const txHash = await sendAndConfirmTransactionSafe(getConnection(), closeTx, [wallet]);
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];

@@ -8,6 +8,7 @@ import {
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
+import { assertLiveTradingAllowed } from "../safety.js";
 
 let _connection = null;
 let _wallet = null;
@@ -142,6 +143,30 @@ export function normalizeMint(mint) {
   return mint;
 }
 
+export function validateLiveSwapRequest({ input_mint, output_mint, amount, balances }) {
+  const inputMint = normalizeMint(input_mint);
+  const outputMint = normalizeMint(output_mint);
+  const numericAmount = Number(amount);
+
+  if (inputMint === config.tokens.SOL || outputMint !== config.tokens.SOL) {
+    throw new Error("Live swap is only allowed to swap non-SOL tokens back to SOL.");
+  }
+  if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    throw new Error("Live swap amount must be a positive finite number.");
+  }
+
+  const token = (balances?.tokens || []).find((entry) => entry.mint === inputMint);
+  if (!token) {
+    throw new Error(`Live swap blocked: token ${inputMint.slice(0, 8)} not found in wallet balances.`);
+  }
+  const balance = Number(token.balance);
+  if (!Number.isFinite(balance) || numericAmount > balance + 1e-12) {
+    throw new Error(`Live swap amount ${numericAmount} exceeds wallet balance ${token.balance}.`);
+  }
+
+  return true;
+}
+
 export async function swapToken({
   input_mint,
   output_mint,
@@ -159,8 +184,11 @@ export async function swapToken({
   }
 
   try {
+    const balances = await getWalletBalances();
+    validateLiveSwapRequest({ input_mint, output_mint, amount, balances });
     log("swap", `${amount} of ${input_mint} → ${output_mint}`);
     const wallet = getWallet();
+    assertLiveTradingAllowed("swap_token", wallet.publicKey);
     const connection = getConnection();
 
     // ─── Convert to smallest unit ──────────────────────────────

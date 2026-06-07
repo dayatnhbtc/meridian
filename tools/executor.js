@@ -235,6 +235,24 @@ function normalizeConfigValue(key, value) {
   return coerceFiniteNumber(value, key);
 }
 
+const LIVE_RISK_LOCKED_CONFIG_KEYS = new Set([
+  "maxDeployAmount",
+  "maxPositions",
+  "deployAmountSol",
+  "positionSizePct",
+  "gasReserve",
+  "lpAgentRelayEnabled",
+  "hiveMindApiKey",
+  "publicApiKey",
+  "agentMeridianApiUrl",
+  "hiveMindUrl",
+  "agentId",
+]);
+
+function lockedConfigKeys(keys) {
+  return keys.filter((key) => LIVE_RISK_LOCKED_CONFIG_KEYS.has(key));
+}
+
 // Map tool names to implementations
 const toolMap = {
   open_paper_position,
@@ -470,6 +488,18 @@ const toolMap = {
     if (Object.keys(applied).length === 0) {
       log("config", `update_config failed — unknown keys: ${JSON.stringify(unknown)}, raw changes: ${JSON.stringify(changes)}`);
       return { success: false, unknown, reason };
+    }
+
+    const locked = lockedConfigKeys(Object.keys(applied));
+    if (locked.length > 0) {
+      log("config", `update_config blocked locked live-risk keys: ${JSON.stringify(locked)}`);
+      return {
+        success: false,
+        error: `Locked live-risk config keys require manual file edit and restart: ${locked.join(", ")}`,
+        locked,
+        unknown,
+        reason,
+      };
     }
 
     let userConfig = {};

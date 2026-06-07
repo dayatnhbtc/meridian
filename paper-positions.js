@@ -11,6 +11,7 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { config } from "./config.js";
 
 const STATE_FILE = "./paper-positions.json";
 const DLMM_API  = "https://dlmm.datapi.meteora.ag";
@@ -33,6 +34,28 @@ function save(state) {
   } catch (e) {
     log("paper_sim", `Failed to write ${STATE_FILE}: ${e.message}`);
   }
+}
+
+function paperPnlPct(pos) {
+  const deposit = Number(pos.deposit_amount ?? pos.deposit ?? 0);
+  const pnl = Number(pos.net_pnl ?? 0);
+  if (!Number.isFinite(deposit) || deposit <= 0 || !Number.isFinite(pnl)) return null;
+  return (pnl / deposit) * 100;
+}
+
+function paperDurationHours(pos) {
+  const start = Number(pos.entry_timestamp ?? 0);
+  const end = Number(pos.last_candle_timestamp ?? Math.floor(Date.now() / 1000));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
+  return (end - start) / 3600;
+}
+
+function paperAnnualizedFeeApr(pos) {
+  const deposit = Number(pos.deposit_amount ?? pos.deposit ?? 0);
+  const fees = Number(pos.fees_earned ?? 0);
+  const hours = paperDurationHours(pos);
+  if (!Number.isFinite(deposit) || deposit <= 0 || !Number.isFinite(fees) || fees <= 0 || hours <= 0) return 0;
+  return (fees / deposit) * (8760 / hours) * 100;
 }
 
 // ─── DLMM helpers (lazy-loaded) ───────────────────────────────────────────────
@@ -193,7 +216,17 @@ export async function openPaperPosition({
   lower_price,
   upper_price,
   strategy_type = "spot",
+  strategy_preset = null,
+  entry_signal = null,
+  exit_signal = null,
 }) {
+  const state = load();
+  const openCount = Object.values(state.positions || {}).filter((p) => p.status === "open").length;
+  const maxPositions = Number(config.risk?.maxPositions ?? 0);
+  if (maxPositions > 0 && openCount >= maxPositions) {
+    throw new Error(`Paper max positions reached (${openCount}/${maxPositions}); close an existing paper position before opening another.`);
+  }
+
   const { getBinIdFromPrice } = await getDLMMHelpers();
   const poolCfg = await fetchPoolConfig(pool_address);
 
@@ -234,6 +267,9 @@ export async function openPaperPosition({
     lower_price,
     upper_price,
     strategy_type,
+    strategy_preset,
+    entry_signal,
+    exit_signal,
     bin_step:         binStep,
     lp_fee_fraction:  lpFeeFraction,
     lower_bin_id:     lowerBinId,
@@ -263,7 +299,6 @@ export async function openPaperPosition({
     closed_at:         null,
   };
 
-  const state = load();
   state.positions[id] = position;
   save(state);
 
@@ -327,6 +362,68 @@ export async function tickPaperPositions() {
   }
 
   save(state);
+  applyPaperAutoClose();
+}
+
+/**
+ * Evaluate deterministic paper close rules using live-management equivalents
+ * where paper simulator has enough data.
+ */
+export function evaluatePaperCloseRule(position, managementConfig = config.management) {
+  if (!position || position.status !== "open") return null;
+
+  const pnlPct = paperPnlPct(position);
+  if (pnlPct != null && pnlPct <= managementConfig.stopLossPct) {
+    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+  }
+  if (pnlPct != null && pnlPct >= managementConfig.takeProfitPct) {
+    return { action: "CLOSE", rule: 2, reason: "take profit" };
+  }
+
+  const lastPrice = Number(position.last_price);
+  const lower = Number(position.lower_price);
+  const upper = Number(position.upper_price);
+  if (Number.isFinite(lastPrice) && Number.isFinite(lower) && lastPrice < lower) {
+    return { action: "CLOSE", rule: 3, reason: "out of range below" };
+  }
+  if (Number.isFinite(lastPrice) && Number.isFinite(upper) && lastPrice > upper) {
+    return { action: "CLOSE", rule: 4, reason: "out of range above" };
+  }
+
+  const minAgeMinutes = Number(managementConfig.minAgeBeforeYieldCheck ?? 60);
+  const ageMinutes = paperDurationHours(position) * 60;
+  if (ageMinutes >= minAgeMinutes) {
+    const apr = paperAnnualizedFeeApr(position);
+    if (apr < managementConfig.minFeePerTvl24h) {
+      return { action: "CLOSE", rule: 5, reason: "low yield" };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Close paper positions that hit deterministic exit rules. Returns closed summaries.
+ */
+export function applyPaperAutoClose(managementConfig = config.management) {
+  const state = load();
+  const closed = [];
+
+  for (const pos of Object.values(state.positions || {})) {
+    const closeRule = evaluatePaperCloseRule(pos, managementConfig);
+    if (!closeRule) continue;
+
+    pos.status = "closed";
+    pos.closed_at = new Date().toISOString();
+    pos.close_rule = closeRule.rule;
+    pos.close_reason = closeRule.reason;
+    state.positions[pos.id] = pos;
+    closed.push(formatSummary(pos));
+    log("paper_sim", `Auto-closed paper position ${pos.id}: rule ${closeRule.rule} ${closeRule.reason} | netPnL=$${pos.net_pnl} fees=$${pos.fees_earned} IL=$${pos.il_usd}`);
+  }
+
+  if (closed.length > 0) save(state);
+  return closed;
 }
 
 /**
@@ -384,6 +481,9 @@ function formatSummary(pos) {
     pair:          pos.pair,
     status:        pos.status,
     strategy:      pos.strategy_type,
+    strategy_preset: pos.strategy_preset ?? null,
+    entry_signal:  pos.entry_signal ?? null,
+    exit_signal:   pos.exit_signal ?? null,
     deposit:       pos.deposit_amount,
     range:         { lower: pos.lower_price, upper: pos.upper_price, scale: pos.price_scale ?? 1 },
     entry_price:   pos.entry_price,
@@ -397,5 +497,7 @@ function formatSummary(pos) {
     in_range_pct:  inRangePct,
     candles_total: pos.candles_total,
     annualized_fee_apr: annualizedApr,
+    close_rule:     pos.close_rule ?? null,
+    close_reason:   pos.close_reason ?? null,
   };
 }

@@ -169,6 +169,11 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
             enum: ["bid_ask", "spot"],
             description: "DLMM strategy type. If user specifies, use exactly what they said. Otherwise use the active strategy's lp_strategy field."
           },
+          strategy_preset: {
+            type: "string",
+            enum: ["evil_panda_safe_v1"],
+            description: "Optional paper-only preset. evil_panda_safe_v1 applies spot, single-side SOL, 15m Supertrend entry metadata, -86% downside range, and Evil Panda exit metadata. Refuses live mode until verified."
+          },
           bins_below: {
             type: "number",
             description: "Number of bins below the current active bin. For single-side SOL deploys, this is the main range input: lower bin = active bin - bins_below, upper bin = active bin."
@@ -1140,6 +1145,11 @@ Use before deploying a real position to validate range, strategy, and fee expect
             type: "string",
             enum: ["spot", "curve", "bid-ask"],
             description: "Liquidity distribution strategy (default: spot)",
+          },
+          strategy_preset: {
+            type: "string",
+            enum: ["evil_panda_safe_v1"],
+            description: "Optional paper strategy preset metadata. Use evil_panda_safe_v1 only for Evil Panda paper simulation.",
           },
         },
       },

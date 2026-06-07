@@ -116,6 +116,10 @@ function shouldUsePnlRecheck() {
   return !config.api.lpAgentRelayEnabled;
 }
 
+function isManualLiveOnly() {
+  return process.env.DRY_RUN !== "true" && String(process.env.MANUAL_LIVE_ONLY || "").toLowerCase() === "true";
+}
+
 function schedulePeakConfirmation(positionAddress) {
   if (!positionAddress || _peakConfirmTimers.has(positionAddress)) return;
 
@@ -221,6 +225,11 @@ export async function runManagementCycle({ silent = false } = {}) {
         mgmtReport = `${formatPaperPositions(getOpenPaperPositions())}
 
 Mode: DRY RUN paper simulator — live wallet has no on-chain LP position.`;
+        return mgmtReport;
+      }
+      if (isManualLiveOnly()) {
+        log("cron", "No open positions — manual live only; automatic screening/deploy is paused");
+        mgmtReport = "No open positions. Manual live only: use /screen, /candidates, then /deploy <n>.";
         return mgmtReport;
       }
       log("cron", "No open positions — triggering screening cycle");
@@ -362,8 +371,12 @@ After executing, write a brief one-line result per position.
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
-      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
-      runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      if (isManualLiveOnly()) {
+        log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — manual live only; automatic screening/deploy is paused`);
+      } else {
+        log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
+        runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      }
     }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
@@ -745,7 +758,9 @@ export function startCronJobs() {
     await runManagementCycle();
   });
 
-  const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);
+  const screenTask = isManualLiveOnly()
+    ? null
+    : cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);
 
   const healthTask = cron.schedule(`0 * * * *`, async () => {
     if (_managementBusy) return;
@@ -834,10 +849,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, 30_000);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, paperSimTask, briefingTask, briefingWatchdog];
+  _cronTasks = [mgmtTask, screenTask, healthTask, paperSimTask, briefingTask, briefingWatchdog].filter(Boolean);
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
-  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
+  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening ${isManualLiveOnly() ? "manual only" : `every ${config.schedule.screeningIntervalMin}m`}`);
 }
 
 // ═══════════════════════════════════════════
@@ -1476,22 +1491,22 @@ async function telegramHandler(msg) {
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      await tickPaperPositions().catch(() => {});
-      const paperPositions = listPaperPositions();
-      const sections = [];
-      if (total_positions > 0) {
-        const cur = config.management.solMode ? "◎" : "$";
-        const lines = positions.map((p, i) => {
-          const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-          const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-          const oor = !p.in_range ? " ⚠️OOR" : "";
-          return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
-        });
-        sections.push(`📊 Open On-chain Positions (${total_positions}):\n\n${lines.join("\n")}`);
+      const cur = config.management.solMode ? "◎" : "$";
+      const lines = positions.map((p, i) => {
+        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+        const oor = !p.in_range ? " ⚠️OOR" : "";
+        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+      });
+      const paperOpenCount = getOpenPaperPositions().length;
+      const paperHint = paperOpenCount > 0
+        ? `\n\nPaper simulator: ${paperOpenCount} open paper position(s). Use /paper to view, /paperclose <n> to close paper.`
+        : "";
+      if (total_positions <= 0) {
+        await sendMessage(`No open on-chain positions.${paperHint}`);
+        return;
       }
-      if (paperPositions.length > 0) sections.push(formatPaperPositions(paperPositions));
-      if (!sections.length) { await sendMessage("No open positions and no paper simulator positions."); return; }
-      await sendMessage(`${sections.join("\n\n")}\n\n/close <n> for on-chain | /paperclose <n> for paper | /set <n> <note> for on-chain`);
+      await sendMessage(`📊 Open On-chain Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> for ON-CHAIN LIVE | /set <n> <note> for on-chain${paperHint}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -2065,15 +2080,19 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 
 } else if (isMain) {
   // Non-TTY: start immediately
-  log("startup", "Non-TTY mode — starting cron cycles immediately.");
+  log("startup", isManualLiveOnly()
+    ? "Non-TTY mode — starting management cycles; automatic screening/deploy is manual-only."
+    : "Non-TTY mode — starting cron cycles immediately.");
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
-  (async () => {
-    try {
-      await runScreeningCycle({ silent: false });
-    } catch (e) {
-      log("startup_error", e.message);
-    }
-  })();
+  if (!isManualLiveOnly()) {
+    (async () => {
+      try {
+        await runScreeningCycle({ silent: false });
+      } catch (e) {
+        log("startup_error", e.message);
+      }
+    })();
+  }
 }
