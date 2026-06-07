@@ -170,6 +170,15 @@ export async function editMessage(text, messageId) {
   });
 }
 
+export async function editHTML(html, messageId) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    text: String(html).slice(0, 4096),
+    parse_mode: "HTML",
+  });
+}
+
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   if (!TOKEN || !chatId || !messageId) return null;
   return postTelegram("editMessageText", {
@@ -269,9 +278,10 @@ function summarizeToolResult(name, result) {
   }
 }
 
-export async function createLiveMessage(title, intro = "Starting...") {
+export async function createLiveMessage(title, intro = "Starting...", options = {}) {
   if (!TOKEN || !chatId) return null;
   const typing = createTypingIndicator();
+  const useHTML = options.parseMode === "HTML";
 
   const state = {
     title,
@@ -297,11 +307,12 @@ export async function createLiveMessage(title, intro = "Starting...") {
     state.flushRequested = false;
     const text = render();
     if (!state.messageId) {
-      const sent = await sendMessage(text);
+      const sent = useHTML ? await sendHTML(text) : await sendMessage(text);
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(text, state.messageId);
+    if (useHTML) await editHTML(text, state.messageId);
+    else await editMessage(text, state.messageId);
   }
 
   function scheduleFlush(delay = 300) {

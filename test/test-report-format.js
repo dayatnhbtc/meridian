@@ -20,7 +20,8 @@ const position = {
 };
 
 const line = formatPositionLine(position, { action: "STAY" }, { solMode: true });
-assert.match(line, /\*\*Bountywork-SOL\*\*/);
+assert.match(line, /<b>Bountywork-SOL<\/b>/);
+assert.doesNotMatch(line, /\*\*Bountywork-SOL\*\*/);
 assert.match(line, /🔴 OOR 17m/);
 assert.match(line, /✅ STAY/);
 assert.match(line, /Val: ◎2\.5004/);
@@ -39,7 +40,8 @@ const portfolio = formatPortfolioReport([position], new Map([["pos1", { action: 
 assert.match(portfolio, /^No tool actions needed\./);
 assert.match(portfolio, /Portfolio 💼 1 position/);
 assert.match(portfolio, /Total: ◎2\.5004  Fees: ◎0\.0393/);
-assert.match(portfolio, /\*no action\*/);
+assert.match(portfolio, /<i>no action<\/i>/);
+assert.doesNotMatch(portfolio, /\*no action\*/);
 
 const skip = formatScreeningSkipReport({
   reason: "max positions reached",

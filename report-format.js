@@ -1,3 +1,10 @@
+export function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function num(value, digits = 2) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "?";
@@ -42,15 +49,15 @@ function rangeBar(position, width = 22) {
 export function formatPositionLine(position, action = {}, options = {}) {
   const inRange = position.in_range ? "🟢 IN" : `🔴 OOR ${Math.round(Number(position.minutes_out_of_range ?? 0))}m`;
   const lines = [
-    `**${position.pair || position.pool || "Unknown"}**  ${inRange}  ${actionBadge(action)}`,
+    `<b>${escapeHtml(position.pair || position.pool || "Unknown")}</b>  ${inRange}  ${actionBadge(action)}`,
     `Val: ${money(position.total_value_usd, options)}  📈 PnL: ${pct(position.pnl_pct)}`,
     `Fees: ${money(position.unclaimed_fees_usd, options)}  Yield: ${pct(position.fee_per_tvl_24h)}  Age: ${position.age_minutes ?? "?"}m`,
   ];
   const bar = rangeBar(position);
-  if (bar) lines.push(bar);
-  if (position.instruction) lines.push(`Note: "${position.instruction}"`);
+  if (bar) lines.push(`<pre>${escapeHtml(bar)}</pre>`);
+  if (position.instruction) lines.push(`Note: "${escapeHtml(position.instruction)}"`);
   if (action.action === "CLOSE" && action.reason) {
-    lines.push(`Rule${action.rule ? ` ${action.rule}` : ""}: ${action.reason}`);
+    lines.push(`Rule${action.rule ? ` ${escapeHtml(action.rule)}` : ""}: ${escapeHtml(action.reason)}`);
   }
   if (action.action === "CLAIM") lines.push("→ Claiming fees");
   return lines.join("\n");
@@ -59,7 +66,7 @@ export function formatPositionLine(position, action = {}, options = {}) {
 export function formatPortfolioReport(positions = [], actionMap = new Map(), options = {}) {
   const solMode = Boolean(options.solMode);
   if (!positions.length) {
-    return [options.intro, "Portfolio 💼 0 positions", options.actionSummary ? `*${options.actionSummary}*` : null]
+    return [options.intro ? escapeHtml(options.intro) : null, "Portfolio 💼 0 positions", options.actionSummary ? `<i>${escapeHtml(options.actionSummary)}</i>` : null]
       .filter(Boolean)
       .join("\n\n");
   }
@@ -71,20 +78,20 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
   const actionSummary = options.actionSummary || "no action";
 
   return [
-    options.intro,
+    options.intro ? escapeHtml(options.intro) : null,
     `Portfolio 💼 ${positions.length} position${positions.length === 1 ? "" : "s"}`,
     `Total: ${money(totalValue, { solMode })}  Fees: ${money(totalFees, { solMode })}`,
     "",
     body,
     "",
-    `*${actionSummary}*`,
+    `<i>${escapeHtml(actionSummary)}</i>`,
   ].filter((line) => line !== null && line !== undefined).join("\n");
 }
 
 export function formatScreeningSkipReport({ reason, positions = [], solMode = false, maxPositions = null, wallet = null } = {}) {
   const header = [
     "🔍 Screening Cycle",
-    `Skipped: ${reason || "pre-check guard"}`,
+    `Skipped: ${escapeHtml(reason || "pre-check guard")}`,
     maxPositions != null ? `Positions: ${positions.length}/${maxPositions}` : null,
     wallet?.sol != null ? `Wallet: ${num(wallet.sol, 3)} SOL` : null,
   ].filter(Boolean).join("\n");

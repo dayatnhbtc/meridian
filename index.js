@@ -36,7 +36,7 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
-import { formatPortfolioReport, formatScreeningSkipReport } from "./report-format.js";
+import { formatPortfolioReport, formatScreeningSkipReport, escapeHtml } from "./report-format.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -221,7 +221,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", { parseMode: "HTML" });
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -312,7 +312,6 @@ Mode: DRY RUN paper simulator — live wallet has no on-chain LP position.`;
     const cur = config.management.solMode ? "◎" : "$";
     mgmtReport = formatPortfolioReport(positionData, actionMap, {
       solMode: config.management.solMode,
-      intro: needsAction.length > 0 ? `${needsAction.length} tool action(s) needed.` : "No tool actions needed.",
       actionSummary,
     });
 
@@ -355,7 +354,7 @@ After executing, write a brief one-line result per position.
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
-      mgmtReport += `\n\n${content}`;
+      mgmtReport += `\n\n${escapeHtml(content)}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
       await liveMessage?.note("No tool actions needed.");
@@ -380,7 +379,7 @@ After executing, write a brief one-line result per position.
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendHTML(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -1485,7 +1484,7 @@ async function telegramHandler(msg) {
       const suffix = text === "/status" && positions.total_positions
         ? `\n\n${formatPortfolioReport(positions.positions || [], new Map(), { solMode: config.management.solMode, actionSummary: "snapshot only" })}`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      await sendHTML(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1502,13 +1501,13 @@ async function telegramHandler(msg) {
       const { positions, total_positions } = await getMyPositions({ force: true });
       const paperOpenCount = getOpenPaperPositions().length;
       const paperHint = paperOpenCount > 0
-        ? `\n\nPaper simulator: ${paperOpenCount} open paper position(s). Use /paper to view, /paperclose <n> to close paper.`
+        ? `\n\nPaper simulator: ${paperOpenCount} open paper position(s). Use /paper to view, /paperclose &lt;n&gt; to close paper.`
         : "";
       if (total_positions <= 0) {
         await sendMessage(`No open on-chain positions.${paperHint}`);
         return;
       }
-      await sendMessage(`${formatPortfolioReport(positions, new Map(), { solMode: config.management.solMode, actionSummary: "snapshot only" })}\n\n/close <n> for ON-CHAIN LIVE | /set <n> <note> for on-chain${paperHint}`);
+      await sendHTML(`${formatPortfolioReport(positions, new Map(), { solMode: config.management.solMode, actionSummary: "snapshot only" })}\n\n/close &lt;n&gt; for ON-CHAIN LIVE | /set &lt;n&gt; &lt;note&gt; for on-chain${paperHint}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1542,7 +1541,7 @@ async function telegramHandler(msg) {
       const { positions } = await getMyPositions({ force: true });
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
-      await sendMessage([
+      await sendHTML([
         formatPortfolioReport([pos], new Map(), { solMode: config.management.solMode, actionSummary: "pool detail" }),
         "",
         `Pool: ${pos.pool}`,
