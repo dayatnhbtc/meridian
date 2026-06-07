@@ -3,6 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
@@ -35,6 +36,7 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
+import { formatPortfolioReport, formatScreeningSkipReport } from "./report-format.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -301,32 +303,18 @@ Mode: DRY RUN paper simulator — live wallet has no on-chain LP position.`;
       actionMap.set(p.position, { action: "STAY" });
     }
 
-    // ── Build JS report ──────────────────────────────────────────────
-    const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
-    const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
-
-    const reportLines = positionData.map((p) => {
-      const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      return line;
-    });
-
+    // ── Build compact Telegram report ────────────────────────────────
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
     const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    mgmtReport = formatPortfolioReport(positionData, actionMap, {
+      solMode: config.management.solMode,
+      intro: needsAction.length > 0 ? `${needsAction.length} tool action(s) needed.` : "No tool actions needed.",
+      actionSummary,
+    });
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -422,7 +410,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const effectivePositionCount = Math.max(prePositions.total_positions, paperOpenCount);
     if (effectivePositionCount >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${effectivePositionCount}/${config.risk.maxPositions})`);
-      screenReport = `Screening skipped — max positions reached (${effectivePositionCount}/${config.risk.maxPositions}).${paperOpenCount ? " Paper simulator position is open; use /paper to view PnL." : ""}`;
+      screenReport = formatScreeningSkipReport({
+        reason: `max positions reached (${effectivePositionCount}/${config.risk.maxPositions})${paperOpenCount ? "; paper simulator position is open" : ""}`,
+        positions: prePositions.positions || [],
+        solMode: config.management.solMode,
+        maxPositions: config.risk.maxPositions,
+        wallet: preBalance,
+      });
       appendDecision({
         type: "skip",
         actor: "SCREENER",
@@ -436,7 +430,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const isDryRun = process.env.DRY_RUN === "true";
     if (!isDryRun && preBalance.sol < minRequired) {
       log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
+      screenReport = formatScreeningSkipReport({
+        reason: `insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`,
+        positions: prePositions.positions || [],
+        solMode: config.management.solMode,
+        maxPositions: config.risk.maxPositions,
+        wallet: preBalance,
+      });
       appendDecision({
         type: "skip",
         actor: "SCREENER",
@@ -874,6 +874,24 @@ async function shutdown(signal) {
     log("shutdown", "Open position snapshot skipped during shutdown timeout");
   }
   process.exit(0);
+}
+
+async function stopFromTelegram() {
+  stopCronJobs();
+  stopPolling();
+  await sendMessage("🛑 Stopping Meridian under PM2. Telegram control will go offline until PM2 starts it again.").catch(() => {});
+  if (process.env.pm_id != null) {
+    log("shutdown", "Telegram /stop requested — asking PM2 supervisor to stop meridian");
+    const child = spawn("npx", ["pm2", "stop", "meridian"], {
+      cwd: REPO_ROOT,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    setTimeout(() => process.exit(0), 1500);
+    return;
+  }
+  await shutdown("telegram /stop");
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
@@ -1423,6 +1441,19 @@ async function telegramHandler(msg) {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
+
+  // Supervisor/control commands must bypass the busy queue.
+  if (text === "/stop") {
+    await stopFromTelegram();
+    return;
+  }
+  if (text === "/pause") {
+    stopCronJobs();
+    cronStarted = false;
+    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => {});
+    return;
+  }
+
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
@@ -1452,7 +1483,7 @@ async function telegramHandler(msg) {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
       const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
+        ? `\n\n${formatPortfolioReport(positions.positions || [], new Map(), { solMode: config.management.solMode, actionSummary: "snapshot only" })}`
         : "";
       await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
@@ -1469,13 +1500,6 @@ async function telegramHandler(msg) {
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
-      });
       const paperOpenCount = getOpenPaperPositions().length;
       const paperHint = paperOpenCount > 0
         ? `\n\nPaper simulator: ${paperOpenCount} open paper position(s). Use /paper to view, /paperclose <n> to close paper.`
@@ -1484,7 +1508,7 @@ async function telegramHandler(msg) {
         await sendMessage(`No open on-chain positions.${paperHint}`);
         return;
       }
-      await sendMessage(`📊 Open On-chain Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> for ON-CHAIN LIVE | /set <n> <note> for on-chain${paperHint}`);
+      await sendMessage(`${formatPortfolioReport(positions, new Map(), { solMode: config.management.solMode, actionSummary: "snapshot only" })}\n\n/close <n> for ON-CHAIN LIVE | /set <n> <note> for on-chain${paperHint}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1519,15 +1543,11 @@ async function telegramHandler(msg) {
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
+        formatPortfolioReport([pos], new Map(), { solMode: config.management.solMode, actionSummary: "pool detail" }),
+        "",
         `Pool: ${pos.pool}`,
         `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      ].join("\n"));
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }

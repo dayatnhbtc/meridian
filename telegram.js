@@ -408,17 +408,20 @@ async function poll(onMessage) {
   }
 }
 
-const BOT_COMMANDS = [
+export const BOT_COMMANDS = [
   { command: "help",       description: "Show commands" },
-  { command: "status",     description: "Wallet + positions snapshot" },
+  { command: "status",     description: "Wallet + rich portfolio snapshot" },
   { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
-  { command: "positions",  description: "List open positions" },
+  { command: "positions",  description: "Rich open-position report" },
+  { command: "paper",      description: "List paper simulator PnL" },
+  { command: "paperclose", description: "Close paper position by index" },
   { command: "pool",       description: "Detailed info for one open position" },
   { command: "close",      description: "Close one position by index" },
   { command: "closeall",   description: "Close all open positions" },
   { command: "set",        description: "Set note/instruction on position" },
   { command: "config",     description: "Show important runtime config" },
   { command: "settings",   description: "Button menu for common config" },
+  { command: "menu",       description: "Alias for settings menu" },
   { command: "setcfg",     description: "Update persisted config key" },
   { command: "screen",     description: "Refresh deterministic candidate list" },
   { command: "candidates", description: "Show latest cached candidates" },
@@ -427,7 +430,7 @@ const BOT_COMMANDS = [
   { command: "hive",       description: "HiveMind sync status" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
-  { command: "stop",       description: "Shut down agent" },
+  { command: "stop",       description: "Stop PM2 process" },
 ];
 
 async function registerCommands() {
