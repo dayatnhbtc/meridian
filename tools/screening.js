@@ -48,6 +48,66 @@ function isUsableVolatility(value) {
   return Number.isFinite(n) && n > 0;
 }
 
+export function evaluateTvlMcapRisk({ tvl, mcap, volatility }, s = config.screening) {
+  const tvlValue = numeric(tvl);
+  const mcapValue = numeric(mcap);
+  const volatilityValue = numeric(volatility);
+  const preferredRatio = numeric(s?.minTvlMcapRatio) ?? 0.10;
+  const hardRatio = numeric(s?.hardRejectTvlMcapRatio) ?? 0.03;
+  const hardVolatility = numeric(s?.hardRejectTvlMcapVolatility) ?? 3.0;
+
+  if (tvlValue == null || tvlValue <= 0 || mcapValue == null || mcapValue <= 0) {
+    return {
+      ratio: null,
+      ratioPct: null,
+      requiredTvl: mcapValue != null && mcapValue > 0 ? round(mcapValue * preferredRatio) : null,
+      level: "unknown",
+      hardReject: false,
+      reason: null,
+    };
+  }
+
+  const ratio = tvlValue / mcapValue;
+  const ratioPct = Number((ratio * 100).toFixed(2));
+  const preferredPct = Number((preferredRatio * 100).toFixed(2));
+  const hardPct = Number((hardRatio * 100).toFixed(2));
+  const requiredTvl = round(mcapValue * preferredRatio);
+  const highVolatility = volatilityValue != null && volatilityValue > hardVolatility;
+  const hardReject = ratio < hardRatio && highVolatility;
+
+  if (hardReject) {
+    return {
+      ratio,
+      ratioPct,
+      requiredTvl,
+      level: "critical",
+      hardReject: true,
+      reason: `TVL/mcap ${ratioPct.toFixed(2)}% below hardRejectTvlMcapRatio ${hardPct}% with volatility ${volatilityValue.toFixed(2)} > ${hardVolatility}`,
+    };
+  }
+
+  if (ratio < preferredRatio) {
+    const level = ratio < 0.05 ? "high" : "caution";
+    return {
+      ratio,
+      ratioPct,
+      requiredTvl,
+      level,
+      hardReject: false,
+      reason: `TVL/mcap ${ratioPct.toFixed(2)}% below preferred ${preferredPct}% (required TVL ~$${requiredTvl})`,
+    };
+  }
+
+  return {
+    ratio,
+    ratioPct,
+    requiredTvl,
+    level: "ok",
+    hardReject: false,
+    reason: null,
+  };
+}
+
 function includesCaseInsensitive(values, value) {
   if (!Array.isArray(values) || values.length === 0 || !value) return false;
   const needle = String(value).toLowerCase();
@@ -79,7 +139,7 @@ function getVolatilityTimeframe(sourceTimeframe) {
   return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
 }
 
-function getRawPoolScreeningRejectReason(pool, s) {
+export function getRawPoolScreeningRejectReason(pool, s) {
   const base = pool?.token_x || {};
   const quote = pool?.token_y || {};
   const binStep = numeric(pool?.dlmm_params?.bin_step);
@@ -108,6 +168,8 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (volume == null || volume < s.minVolume) return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
   if (tvl == null || tvl < s.minTvl) return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
+  const tvlMcapRisk = evaluateTvlMcapRisk({ tvl, mcap, volatility }, s);
+  if (tvlMcapRisk.hardReject) return tvlMcapRisk.reason;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
@@ -691,7 +753,12 @@ export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
  * Condense a pool object for LLM consumption.
  * Raw API returns ~100+ fields per pool. The LLM only needs ~20.
  */
-function condensePool(p) {
+export function condensePool(p) {
+  const tvlMcapRisk = evaluateTvlMcapRisk({
+    tvl: p.tvl ?? p.active_tvl,
+    mcap: p.token_x?.market_cap,
+    volatility: p.volatility,
+  });
   return {
     pool: p.pool_address,
     name: p.name,
@@ -712,6 +779,11 @@ function condensePool(p) {
     // Core metrics (the numbers that matter)
     tvl: round(p.tvl),
     active_tvl: round(p.active_tvl),
+    mcap: round(p.token_x?.market_cap),
+    tvl_mcap_pct: tvlMcapRisk.ratioPct,
+    tvl_mcap_risk: tvlMcapRisk.level,
+    tvl_mcap_required_tvl: tvlMcapRisk.requiredTvl,
+    tvl_mcap_reason: tvlMcapRisk.reason,
     fee_window: round(p.fee),
     volume_window: round(p.volume),
     fee_active_tvl_ratio: p.fee_active_tvl_ratio != null ? fix(p.fee_active_tvl_ratio, 4) : null,
@@ -728,7 +800,6 @@ function condensePool(p) {
 
     // Token health
     holders: p.base_token_holders,
-    mcap: round(p.token_x?.market_cap),
     organic_score: Math.round(p.token_x?.organic_score || 0),
     token_age_hours: p.token_x?.created_at
       ? Math.floor((Date.now() - p.token_x.created_at) / 3_600_000)

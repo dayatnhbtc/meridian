@@ -70,6 +70,10 @@ export const config = {
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
+    // TVL/mcap quality gate: keep 10% as preferred/penalty, but only hard-reject very thin high-vol pools.
+    minTvlMcapRatio:   u.minTvlMcapRatio   ?? 0.10,
+    hardRejectTvlMcapRatio: u.hardRejectTvlMcapRatio ?? 0.03,
+    hardRejectTvlMcapVolatility: u.hardRejectTvlMcapVolatility ?? 3.0,
     minOrganic:        u.minOrganic        ?? 60,
     minQuoteOrganic:   u.minQuoteOrganic   ?? 60,
     minHolders:        u.minHolders        ?? 500,
@@ -265,6 +269,9 @@ export function reloadScreeningThresholds() {
     if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
     if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
+    if (fresh.minTvlMcapRatio != null) s.minTvlMcapRatio = fresh.minTvlMcapRatio;
+    if (fresh.hardRejectTvlMcapRatio != null) s.hardRejectTvlMcapRatio = fresh.hardRejectTvlMcapRatio;
+    if (fresh.hardRejectTvlMcapVolatility != null) s.hardRejectTvlMcapVolatility = fresh.hardRejectTvlMcapVolatility;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;

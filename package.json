@@ -15,7 +15,7 @@
     "pm2:restart": "pm2 restart meridian --update-env",
     "pm2:logs": "pm2 logs meridian --lines 100",
     "dev": "DRY_RUN=true node index.js",
-    "test": "npm run test:syntax && npm run test:report-format && npm run test:telegram-commands && npm run test:paper && npm run test:paper-autoclose && npm run test:paper-dashboard && npm run test:evil-panda && npm run test:live-safety && npm run test:post-loss-guards",
+    "test": "npm run test:syntax && npm run test:report-format && npm run test:telegram-commands && npm run test:paper && npm run test:paper-autoclose && npm run test:paper-dashboard && npm run test:evil-panda && npm run test:live-safety && npm run test:post-loss-guards && npm run test:screening-tvl-mcap-risk",
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
     "test:report-format": "node test/test-report-format.js",
     "test:telegram-commands": "node test/test-telegram-commands.js",
@@ -29,6 +29,7 @@
     "dashboard:paper:lan": "PAPER_DASHBOARD_HOST=0.0.0.0 node paper-dashboard.js",
     "dashboard:paper:once": "node paper-dashboard.js --once",
     "test:screen": "node test/test-screening.js",
+    "test:screening-tvl-mcap-risk": "node test/test-screening-tvl-mcap-risk.js",
     "test:agent": "DRY_RUN=true node test/test-agent.js",
     "postinstall": "node scripts/patch-anchor.js"
   },
