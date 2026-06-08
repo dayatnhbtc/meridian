@@ -130,11 +130,33 @@ async function testTwoLossesSamePoolWithin24hBlocksFor48h() {
   });
 }
 
+async function testProfitableRepeatsDoNotCreateCooldown() {
+  await withIsolatedPoolMemory(async () => {
+    const { recordPoolDeploy, isPoolOnCooldown, isBaseMintOnCooldown } = await import(`../pool-memory.js?profitable_repeat_test=${Date.now()}`);
+    for (let i = 0; i < 3; i += 1) {
+      recordPoolDeploy("WIN_POOL", baseDeploy({
+        pool_name: "WIN-SOL",
+        base_mint: "WIN_MINT",
+        closed_at: new Date(Date.now() - (3 - i) * 60 * 60 * 1000).toISOString(),
+        pnl_pct: 2.1,
+        pnl_usd: 0.15,
+        fee_earned_pct: 1.2,
+        fees_earned_usd: 0.08,
+        close_reason: "take profit",
+      }));
+    }
+
+    assert.equal(isPoolOnCooldown("WIN_POOL"), false);
+    assert.equal(isBaseMintOnCooldown("WIN_MINT"), false);
+  });
+}
+
 async function main() {
   await testConfigHardFloors();
   await testLowYieldLossBlocksPoolAndTokenFor12h();
   await testStopLossBlocksPoolAndTokenFor24h();
   await testTwoLossesSamePoolWithin24hBlocksFor48h();
+  await testProfitableRepeatsDoNotCreateCooldown();
   console.log("✅ hard post-loss guards enforce cooldowns and live thresholds");
 }
 
