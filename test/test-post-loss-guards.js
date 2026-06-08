@@ -55,8 +55,8 @@ async function testConfigHardFloors() {
   const { config } = await import(`../config.js?post_loss_guard_test=${Date.now()}`);
   assert.equal(config.management.stopLossPct, -10, "live stop-loss should be tightened to -10%");
   assert.ok(
-    Number(config.screening.minFeeActiveTvlRatio) >= 2.5,
-    "entry fee/active-TVL floor should reject weak 1–2% pools before the LLM sees them",
+    Number(config.screening.minFeeActiveTvlRatio) >= 0.1,
+    "minFeeActiveTvlRatio should reject dead/no-fee pools before LLM selection"
   );
 }
 

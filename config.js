@@ -64,9 +64,9 @@ export const config = {
   // ─── Pool Screening Thresholds ───────────
   screening: {
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
-    // HARD ENTRY FLOOR: reject weak fee/active-TVL pools before the LLM sees them.
-    // Learning may raise this via user-config, but prompt/agent cannot lower it in live execution.
-    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 2.5,
+    // HARD ENTRY FLOOR: reject dead/no-fee pools before the LLM sees them.
+    // Keep this as a low viability gate; quality/risk is handled by memory, cooldowns, and LLM review.
+    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.12,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
