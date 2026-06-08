@@ -64,7 +64,9 @@ export const config = {
   // ─── Pool Screening Thresholds ───────────
   screening: {
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
-    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    // HARD ENTRY FLOOR: reject weak fee/active-TVL pools before the LLM sees them.
+    // Learning may raise this via user-config, but prompt/agent cannot lower it in live execution.
+    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 2.5,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -104,10 +106,21 @@ export const config = {
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    // HARD LIVE EXIT: cap downside in code/config, not in LLM prompt.
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -10,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
+    // HARD POST-CLOSE REDEPLOY GUARDS. Learning/prompt can add context, but these cooldowns are enforced before candidate selection.
+    postLossCooldownEnabled: u.postLossCooldownEnabled ?? true,
+    lowYieldLossCooldownHours: u.lowYieldLossCooldownHours ?? 12,
+    stopLossCooldownHours: u.stopLossCooldownHours ?? 24,
+    repeatLossTriggerCount: u.repeatLossTriggerCount ?? 2,
+    repeatLossWindowHours: u.repeatLossWindowHours ?? 24,
+    repeatLossCooldownHours: u.repeatLossCooldownHours ?? 48,
+    repeatDeployMinPreviousPnlPct: u.repeatDeployMinPreviousPnlPct ?? 1,
+    repeatDeployMinPreviousFeeEarnedPct: u.repeatDeployMinPreviousFeeEarnedPct ?? 1,
+    repeatDeployNonQualifyingCooldownHours: u.repeatDeployNonQualifyingCooldownHours ?? 12,
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,

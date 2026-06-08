@@ -61,23 +61,113 @@ function isFeeGeneratingDeploy(deploy) {
   return Number.isFinite(feeEarnedPct) && feeEarnedPct >= minFeeEarnedPct;
 }
 
+function isLowYieldCloseReason(reason) {
+  return String(reason || "").trim().toLowerCase().includes("low yield");
+}
+
+function isStopLossCloseReason(reason) {
+  const text = String(reason || "").trim().toLowerCase();
+  return text.includes("stop loss") || text.includes("stop-loss") || text === "sl";
+}
+
+function isLossDeploy(deploy) {
+  const pnlPct = Number(deploy.pnl_pct ?? 0);
+  const pnlUsd = Number(deploy.pnl_usd ?? 0);
+  return (Number.isFinite(pnlPct) && pnlPct < 0) || (Number.isFinite(pnlUsd) && pnlUsd < 0);
+}
+
+function isRepeatDeployQualified(deploy) {
+  const minPnlPct = Number(config.management.repeatDeployMinPreviousPnlPct ?? 1);
+  const minFeePct = Number(config.management.repeatDeployMinPreviousFeeEarnedPct ?? 1);
+  const pnlPct = Number(deploy.pnl_pct ?? 0);
+  const feePct = Number(deploy.fee_earned_pct ?? 0);
+  return (Number.isFinite(pnlPct) && pnlPct > minPnlPct) ||
+    (Number.isFinite(feePct) && feePct > minFeePct);
+}
+
+function newerIso(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return new Date(a) >= new Date(b) ? a : b;
+}
+
 function setPoolCooldown(entry, hours, reason) {
   const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
-  entry.cooldown_until = cooldownUntil;
-  entry.cooldown_reason = reason;
-  return cooldownUntil;
+  const previousUntil = entry.cooldown_until;
+  entry.cooldown_until = newerIso(previousUntil, cooldownUntil);
+  if (entry.cooldown_until === cooldownUntil) entry.cooldown_reason = reason;
+  return entry.cooldown_until;
 }
 
 function setBaseMintCooldown(db, baseMint, hours, reason) {
   if (!baseMint) return null;
   const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+  let appliedUntil = null;
   for (const entry of Object.values(db)) {
     if (entry?.base_mint === baseMint) {
-      entry.base_mint_cooldown_until = cooldownUntil;
-      entry.base_mint_cooldown_reason = reason;
+      entry.base_mint_cooldown_until = newerIso(entry.base_mint_cooldown_until, cooldownUntil);
+      if (entry.base_mint_cooldown_until === cooldownUntil) entry.base_mint_cooldown_reason = reason;
+      appliedUntil = entry.base_mint_cooldown_until;
     }
   }
-  return cooldownUntil;
+  return appliedUntil;
+}
+
+function setPoolAndBaseMintCooldown(db, entry, hours, reason) {
+  const poolCooldownUntil = setPoolCooldown(entry, hours, reason);
+  const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, hours, reason);
+  return { poolCooldownUntil, mintCooldownUntil };
+}
+
+function applyPostCloseHardCooldowns(db, entry, deploy) {
+  if (!config.management.postLossCooldownEnabled) return;
+
+  const pnlPct = Number(deploy.pnl_pct ?? 0);
+  const cooldowns = [];
+
+  if (isLowYieldCloseReason(deploy.close_reason) && isLossDeploy(deploy)) {
+    cooldowns.push({
+      hours: Number(config.management.lowYieldLossCooldownHours ?? 12),
+      reason: `low yield loss (${Number.isFinite(pnlPct) ? pnlPct.toFixed(2) : "unknown"}% PnL)`,
+    });
+  }
+
+  if (isStopLossCloseReason(deploy.close_reason)) {
+    cooldowns.push({
+      hours: Number(config.management.stopLossCooldownHours ?? 24),
+      reason: `stop loss close (${Number.isFinite(pnlPct) ? pnlPct.toFixed(2) : "unknown"}% PnL)`,
+    });
+  }
+
+  const triggerCount = Math.max(1, Number(config.management.repeatLossTriggerCount ?? 2));
+  const windowHours = Math.max(0, Number(config.management.repeatLossWindowHours ?? 24));
+  const windowStart = Date.now() - windowHours * 60 * 60 * 1000;
+  const recentLosses = entry.deploys.filter((d) => {
+    const closedAt = new Date(d.closed_at || 0).getTime();
+    return Number.isFinite(closedAt) && closedAt >= windowStart && isLossDeploy(d);
+  });
+  if (recentLosses.length >= triggerCount) {
+    cooldowns.push({
+      hours: Number(config.management.repeatLossCooldownHours ?? 48),
+      reason: `${triggerCount} losses in ${windowHours}h`,
+    });
+  }
+
+  if (cooldowns.length === 0 && !isRepeatDeployQualified(deploy)) {
+    cooldowns.push({
+      hours: Number(config.management.repeatDeployNonQualifyingCooldownHours ?? 12),
+      reason: `repeat deploy blocked: previous close below +${config.management.repeatDeployMinPreviousPnlPct}% PnL and +${config.management.repeatDeployMinPreviousFeeEarnedPct}% fees`,
+    });
+  }
+
+  for (const cooldown of cooldowns) {
+    if (!(cooldown.hours > 0)) continue;
+    const { poolCooldownUntil, mintCooldownUntil } = setPoolAndBaseMintCooldown(db, entry, cooldown.hours, cooldown.reason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${cooldown.reason})`);
+    if (entry.base_mint && mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${cooldown.reason})`);
+    }
+  }
 }
 
 // ─── Write ─────────────────────────────────────────────────────
@@ -169,12 +259,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
-  if (deploy.close_reason === "low yield") {
-    const cooldownHours = 4;
-    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
-    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
-  }
+  applyPostCloseHardCooldowns(db, entry, deploy);
 
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
   const oorCooldownHours = config.management.oorCooldownHours ?? 12;
