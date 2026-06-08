@@ -29,8 +29,9 @@ assert.match(line, /📈 PnL: 1\.56%/);
 assert.match(line, /Fees: ◎0\.0393/);
 assert.match(line, /Yield: 20\.87%/);
 assert.match(line, /Age: 109m/);
-assert.match(line, /\[[\s\S]*▮[\s\S]*\]/);
-assert.match(line, /-570\s+-470/);
+assert.match(line, /\[[─●]+\]/);
+assert.doesNotMatch(line, /▼/);
+assert.match(line, /-570\s+-505\s+-470/);
 
 const portfolio = formatPortfolioReport([position], new Map([["pos1", { action: "STAY" }]]), {
   solMode: true,

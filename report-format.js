@@ -39,11 +39,29 @@ function rangeBar(position, width = 22) {
   const active = Number(position.active_bin);
   if (![lower, upper, active].every(Number.isFinite) || upper <= lower) return null;
 
+  const lowerLabel = String(Math.round(lower));
+  const activeLabel = String(Math.round(active));
+  const upperLabel = String(Math.round(upper));
   const ratio = Math.max(0, Math.min(1, (active - lower) / (upper - lower)));
   const marker = Math.max(0, Math.min(width - 1, Math.round(ratio * (width - 1))));
-  const chars = Array.from({ length: width }, (_, i) => (i === marker ? "▮" : "─"));
-  const pointer = `${" ".repeat(marker + 1)}▼`;
-  return `${pointer}\n[${chars.join("")}]\n${Math.round(lower)}${" ".repeat(Math.max(1, width - String(Math.round(lower)).length - String(Math.round(upper)).length + 2))}${Math.round(upper)}`;
+  const chars = Array.from({ length: width }, (_, i) => (i === marker ? "●" : "─"));
+  const bar = `[${chars.join("")}]`;
+  const lineWidth = Math.max(bar.length, lowerLabel.length + activeLabel.length + upperLabel.length + 2);
+  const labels = Array.from({ length: lineWidth }, () => " ");
+
+  function place(label, preferredStart) {
+    const maxStart = Math.max(0, lineWidth - label.length);
+    let start = Math.max(0, Math.min(maxStart, preferredStart));
+    while (start < maxStart && labels.slice(start, start + label.length).some((c) => c !== " ")) start += 1;
+    while (start > 0 && labels.slice(start, start + label.length).some((c) => c !== " ")) start -= 1;
+    for (let i = 0; i < label.length; i += 1) labels[start + i] = label[i];
+  }
+
+  place(lowerLabel, 0);
+  place(upperLabel, lineWidth - upperLabel.length);
+  place(activeLabel, marker + 1 - Math.floor(activeLabel.length / 2));
+
+  return `${bar}\n${labels.join("").trimEnd()}`;
 }
 
 export function formatPositionLine(position, action = {}, options = {}) {
