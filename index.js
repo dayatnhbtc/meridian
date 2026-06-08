@@ -10,7 +10,7 @@ import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -36,7 +36,7 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
-import { formatPortfolioReport, formatScreeningSkipReport, escapeHtml } from "./report-format.js";
+import { formatPortfolioReport, formatScreeningSkipReport, formatDailyPnlReport, escapeHtml } from "./report-format.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -1030,6 +1030,26 @@ function formatWalletStatus(wallet, positions) {
   ].join("\n");
 }
 
+function dateKeyInTimezone(date, timeZone = "Asia/Jakarta") {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function buildTodayPnlReport({ positions = [], now = new Date(), timeZone = "Asia/Jakarta" } = {}) {
+  const todayKey = dateKeyInTimezone(now, timeZone);
+  const realizedPositions = getPerformanceHistory({ hours: 72, limit: 500 }).positions
+    .filter((p) => p.closed_at && dateKeyInTimezone(new Date(p.closed_at), timeZone) === todayKey);
+  return formatDailyPnlReport({
+    dateLabel: `${todayKey} WIB`,
+    realizedPositions,
+    openPositions: positions,
+  });
+}
+
 function formatConfigSnapshot() {
   return [
     "Config snapshot",
@@ -1308,6 +1328,8 @@ function formatHelpText() {
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions + paper simulator PnL",
+    "/pnl — PnL hari ini (realized + open)",
+    "/pnltoday — alias /pnl",
     "/paper — list paper simulator PnL",
     "/paperclose <n> — close one paper simulator position",
     "/pool <n> — detailed info for one open position",
@@ -1508,6 +1530,14 @@ async function telegramHandler(msg) {
         return;
       }
       await sendHTML(`${formatPortfolioReport(positions, new Map(), { solMode: config.management.solMode, actionSummary: "snapshot only" })}\n\n/close &lt;n&gt; for ON-CHAIN LIVE | /set &lt;n&gt; &lt;note&gt; for on-chain${paperHint}`);
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/pnl" || text === "/pnltoday") {
+    try {
+      const { positions } = await getMyPositions({ force: true });
+      await sendHTML(buildTodayPnlReport({ positions: positions || [] })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }

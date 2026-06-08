@@ -424,6 +424,8 @@ export const BOT_COMMANDS = [
   { command: "status",     description: "Wallet + rich portfolio snapshot" },
   { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
   { command: "positions",  description: "Rich open-position report" },
+  { command: "pnl",        description: "Today PnL snapshot" },
+  { command: "pnltoday",   description: "Alias for today's PnL" },
   { command: "paper",      description: "List paper simulator PnL" },
   { command: "paperclose", description: "Close paper position by index" },
   { command: "pool",       description: "Detailed info for one open position" },

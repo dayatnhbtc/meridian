@@ -119,4 +119,59 @@ export function formatScreeningSkipReport({ reason, positions = [], solMode = fa
   return `${header}\n\n${portfolio}`;
 }
 
-export { money, pct, rangeBar };
+function signedMoney(value, { digits = 2 } = {}) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "$?";
+  const sign = n >= 0 ? "+" : "-";
+  return `${sign}$${Math.abs(n).toFixed(digits)}`;
+}
+
+function signedPct(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "?";
+  const sign = n >= 0 ? "+" : "";
+  return `${sign}${num(n, digits)}%`;
+}
+
+function sum(values, field) {
+  return values.reduce((total, item) => total + (Number(item?.[field]) || 0), 0);
+}
+
+export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPositions = [] } = {}) {
+  const realizedPnl = sum(realizedPositions, "pnl_usd");
+  const realizedFees = sum(realizedPositions, "fees_earned_usd");
+  const openPnl = sum(openPositions, "pnl_usd");
+  const openFees = sum(openPositions, "unclaimed_fees_usd");
+  const totalPnl = realizedPnl + openPnl;
+
+  const lines = [
+    "📊 <b>PnL Hari Ini</b>",
+    dateLabel ? escapeHtml(dateLabel) : null,
+    "",
+    `Realized: ${signedMoney(realizedPnl)} (${realizedPositions.length} closed)` + (realizedPositions.length ? `  Fees: ${money(realizedFees, { digits: 2 })}` : ""),
+    `Open: ${signedMoney(openPnl)} (${openPositions.length} open)` + (openPositions.length ? `  Fees: ${money(openFees, { digits: 2 })}` : ""),
+    `<b>Total: ${signedMoney(totalPnl)}</b>`,
+  ].filter((line) => line !== null && line !== undefined);
+
+  if (realizedPositions.length) {
+    lines.push("", "<b>Closed today</b>");
+    for (const p of realizedPositions.slice(0, 8)) {
+      lines.push(`• ${escapeHtml(p.pool_name || p.pair || p.pool || "Unknown")}  ${signedMoney(p.pnl_usd)}  ${signedPct(p.pnl_pct)}`);
+    }
+  }
+
+  if (openPositions.length) {
+    lines.push("", "<b>Open now</b>");
+    for (const p of openPositions.slice(0, 8)) {
+      lines.push(`• ${escapeHtml(p.pair || p.pool || "Unknown")}  ${signedMoney(p.pnl_usd)}  ${signedPct(p.pnl_pct)}`);
+    }
+  }
+
+  if (!realizedPositions.length && !openPositions.length) {
+    lines.push("", "Belum ada closed/open position yang punya PnL hari ini.");
+  }
+
+  return lines.join("\n");
+}
+
+export { money, pct, rangeBar, signedMoney, signedPct };

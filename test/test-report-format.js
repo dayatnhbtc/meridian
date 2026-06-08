@@ -3,6 +3,7 @@ import {
   formatPositionLine,
   formatPortfolioReport,
   formatScreeningSkipReport,
+  formatDailyPnlReport,
 } from "../report-format.js";
 
 const position = {
@@ -53,5 +54,23 @@ const skip = formatScreeningSkipReport({
 assert.match(skip, /🔍 Screening Cycle/);
 assert.match(skip, /Skipped: max positions reached/);
 assert.match(skip, /Portfolio 💼 1 position/);
+
+const daily = formatDailyPnlReport({
+  dateLabel: "2026-06-08 WIB",
+  realizedPositions: [
+    { pool_name: "Bountywork-SOL", pnl_usd: 1.23, pnl_pct: 2.4, fees_earned_usd: 0.45 },
+    { pool_name: "Other-SOL", pnl_usd: -0.5, pnl_pct: -1.1, fees_earned_usd: 0.05 },
+  ],
+  openPositions: [
+    { pair: "Open-SOL", pnl_usd: 0.75, pnl_pct: 1.5, unclaimed_fees_usd: 0.12 },
+  ],
+});
+assert.match(daily, /📊 <b>PnL Hari Ini<\/b>/);
+assert.match(daily, /2026-06-08 WIB/);
+assert.match(daily, /Realized: \+\$0\.73/);
+assert.match(daily, /Open: \+\$0\.75/);
+assert.match(daily, /Total: \+\$1\.48/);
+assert.match(daily, /Bountywork-SOL/);
+assert.doesNotMatch(daily, /\*\*/);
 
 console.log("✅ report formatter renders compact Telegram reports");

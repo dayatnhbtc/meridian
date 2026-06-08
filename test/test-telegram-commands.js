@@ -7,6 +7,8 @@ for (const cmd of [
   "status",
   "wallet",
   "positions",
+  "pnl",
+  "pnltoday",
   "paper",
   "paperclose",
   "pool",
