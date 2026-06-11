@@ -124,6 +124,7 @@ DEPLOY RULES:
 - Use amount_y only, keep amount_x=0 and bins_above=0.
 - Bin steps must be [80-125].
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
+- NO CANDIDATES HANDLING: If ALL pools were filtered out (cooldown, indicator reject, hard gates), call get_top_candidates once to try refreshing the list. If still nothing, call get_top_candidates with a wider timeframe to discover new pools. If truly nothing available, report the situation clearly — it's OK to skip a cycle when no pools qualify.
 
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;

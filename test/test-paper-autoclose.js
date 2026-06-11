@@ -59,28 +59,28 @@ async function main() {
 
     assert.deepEqual(
       evaluatePaperCloseRule(makePosition({ net_pnl: -11 }), mgmt),
-      { action: "CLOSE", rule: 1, reason: "stop loss" },
+      { action: "CLOSE", rule: 1, reason: "[SL] PnL -11.00% <= stopLossPct -10%" },
     );
 
     assert.deepEqual(
       evaluatePaperCloseRule(makePosition({ net_pnl: 6 }), mgmt),
-      { action: "CLOSE", rule: 2, reason: "take profit" },
+      { action: "CLOSE", rule: 2, reason: "[TP] PnL 6.00% >= takeProfitPct 5%" },
     );
 
     assert.deepEqual(
       evaluatePaperCloseRule(makePosition({ last_price: 89, net_pnl: 1 }), mgmt),
-      { action: "CLOSE", rule: 3, reason: "out of range below" },
+      { action: "CLOSE", rule: 3, reason: "[OOR] out of range below" },
     );
 
     assert.deepEqual(
       evaluatePaperCloseRule(makePosition({ last_price: 111, net_pnl: 1 }), mgmt),
-      { action: "CLOSE", rule: 4, reason: "out of range above" },
+      { action: "CLOSE", rule: 4, reason: "[OOR] out of range above" },
     );
 
-    assert.deepEqual(
-      evaluatePaperCloseRule(makePosition({ fees_earned: 0.001, net_pnl: 0.001 }), mgmt),
-      { action: "CLOSE", rule: 5, reason: "low yield" },
-    );
+    const lowYieldRule = evaluatePaperCloseRule(makePosition({ fees_earned: 0.001, net_pnl: 0.001 }), mgmt);
+    assert.equal(lowYieldRule.action, "CLOSE");
+    assert.equal(lowYieldRule.rule, 5);
+    assert.match(lowYieldRule.reason, /^\[Low Yield\] fee\/TVL [0-9.]+% < min 7% \(age: 120m\)$/);
 
     assert.equal(
       evaluatePaperCloseRule(makePosition({ fees_earned: 1, net_pnl: 1, last_price: 100 }), mgmt),
@@ -98,7 +98,7 @@ async function main() {
     const closed = applyPaperAutoClose(mgmt);
     assert.equal(closed.length, 1);
     assert.equal(closed[0].id, "paper-close-me");
-    assert.match(closed[0].close_reason, /out of range below/);
+    assert.match(closed[0].close_reason, /^\[OOR\] out of range below/);
 
     const state = JSON.parse(fs.readFileSync("paper-positions.json", "utf8"));
     assert.equal(state.positions["paper-close-me"].status, "closed");

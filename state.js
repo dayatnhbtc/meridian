@@ -11,6 +11,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { ensureCloseReasonLabel, formatCloseReason } from "./close-reasons.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -73,6 +74,10 @@ export function trackPosition({
   entry_tvl = null,
   entry_volume = null,
   entry_holders = null,
+  entry_volume_change_pct = null,
+  entry_fee_change_pct = null,
+  entry_net_deposits = null,
+  entry_price_change_pct = null,
 }) {
   const state = load();
   state.positions[position] = {
@@ -94,9 +99,14 @@ export function trackPosition({
     entry_tvl,
     entry_volume,
     entry_holders,
+    entry_volume_change_pct,
+    entry_fee_change_pct,
+    entry_net_deposits,
+    entry_price_change_pct,
     signal_snapshot: signal_snapshot || null,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,
+    total_minutes_out_of_range: 0,
     last_claim_at: null,
     total_fees_claimed_usd: 0,
     rebalance_count: 0,
@@ -141,6 +151,8 @@ export function markInRange(position_address) {
   const pos = state.positions[position_address];
   if (!pos) return;
   if (pos.out_of_range_since) {
+    const elapsed = Math.max(0, Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000));
+    pos.total_minutes_out_of_range = Math.max(0, Number(pos.total_minutes_out_of_range) || 0) + elapsed;
     pos.out_of_range_since = null;
     save(state);
     log("state", `Position ${position_address} back in range`);
@@ -157,6 +169,16 @@ export function minutesOutOfRange(position_address) {
   if (!pos || !pos.out_of_range_since) return 0;
   const ms = Date.now() - new Date(pos.out_of_range_since).getTime();
   return Math.floor(ms / 60000);
+}
+
+export function totalMinutesOutOfRange(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return 0;
+  const stored = Math.max(0, Number(pos.total_minutes_out_of_range) || 0);
+  if (!pos.out_of_range_since) return stored;
+  const current = Math.max(0, Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000));
+  return stored + current;
 }
 
 /**
@@ -190,12 +212,13 @@ export function recordClose(position_address, reason) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return;
+  const labeledReason = ensureCloseReasonLabel(reason || "agent decision");
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
-  pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
-  pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
+  pos.notes.push(`Closed at ${pos.closed_at}: ${labeledReason}`);
+  pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason: labeledReason });
   save(state);
-  log("state", `Position ${position_address} marked closed: ${reason}`);
+  log("state", `Position ${position_address} marked closed: ${labeledReason}`);
 }
 
 /**
@@ -309,7 +332,7 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   const stillDroppedEnough = currentPnlPct != null && (pendingPeak - currentPnlPct) >= trailingDropPct;
 
   if (stillNearCrash && stillDroppedEnough) {
-    const reason = `Trailing TP: peak ${pendingPeak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${(pendingPeak - currentPnlPct).toFixed(2)}% >= ${trailingDropPct}%)`;
+    const reason = formatCloseReason("Trailing TP", `peak ${pendingPeak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${(pendingPeak - currentPnlPct).toFixed(2)}% >= ${trailingDropPct}%)`);
     pos.confirmed_trailing_exit_reason = reason;
     pos.confirmed_trailing_exit_until = new Date(Date.now() + 30_000).toISOString();
     save(state);
@@ -360,6 +383,7 @@ export function getStateSummary() {
       deployed_at: p.deployed_at,
       out_of_range_since: p.out_of_range_since,
       minutes_out_of_range: minutesOutOfRange(p.position),
+      total_minutes_out_of_range: totalMinutesOutOfRange(p.position),
       total_fees_claimed_usd: p.total_fees_claimed_usd,
       initial_fee_tvl_24h: p.initial_fee_tvl_24h,
       rebalance_count: p.rebalance_count,
@@ -411,6 +435,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     log("state", `Position ${position_address} marked out of range`);
   } else if (in_range === true && pos.out_of_range_since) {
+    const elapsed = Math.max(0, Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000));
+    pos.total_minutes_out_of_range = Math.max(0, Number(pos.total_minutes_out_of_range) || 0) + elapsed;
     pos.out_of_range_since = null;
     changed = true;
     log("state", `Position ${position_address} back in range`);
@@ -422,7 +448,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+      reason: formatCloseReason("SL", `PnL ${currentPnlPct.toFixed(2)}% <= stopLossPct ${mgmtConfig.stopLossPct}%`),
     };
   }
 
@@ -432,7 +458,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
       return {
         action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
+        reason: formatCloseReason("Trailing TP", `peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`),
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
         current_pnl_pct: currentPnlPct,
@@ -447,7 +473,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
       return {
         action: "OUT_OF_RANGE",
-        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
+        reason: formatCloseReason("OOR", `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`),
       };
     }
   }
@@ -463,7 +489,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   ) {
     return {
       action: "LOW_YIELD",
-      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
+      reason: formatCloseReason("Low Yield", `fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`),
     };
   }
 

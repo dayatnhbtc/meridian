@@ -12,6 +12,8 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { getTakeProfitPctForLpStrategy } from "./strategy-library.js";
+import { formatCloseReason } from "./close-reasons.js";
 
 const STATE_FILE = "./paper-positions.json";
 const DLMM_API  = "https://dlmm.datapi.meteora.ag";
@@ -374,20 +376,22 @@ export function evaluatePaperCloseRule(position, managementConfig = config.manag
 
   const pnlPct = paperPnlPct(position);
   if (pnlPct != null && pnlPct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: formatCloseReason("SL", `PnL ${pnlPct.toFixed(2)}% <= stopLossPct ${managementConfig.stopLossPct}%`) };
   }
-  if (pnlPct != null && pnlPct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+  const takeProfitPct = getTakeProfitPctForLpStrategy(position.strategy) ?? managementConfig.takeProfitPct;
+  if (pnlPct != null && pnlPct >= takeProfitPct) {
+    const strategyLabel = position.strategy ? ` (${position.strategy})` : "";
+    return { action: "CLOSE", rule: 2, reason: formatCloseReason("TP", `PnL ${pnlPct.toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`) };
   }
 
   const lastPrice = Number(position.last_price);
   const lower = Number(position.lower_price);
   const upper = Number(position.upper_price);
   if (Number.isFinite(lastPrice) && Number.isFinite(lower) && lastPrice < lower) {
-    return { action: "CLOSE", rule: 3, reason: "out of range below" };
+    return { action: "CLOSE", rule: 3, reason: formatCloseReason("OOR", "out of range below") };
   }
   if (Number.isFinite(lastPrice) && Number.isFinite(upper) && lastPrice > upper) {
-    return { action: "CLOSE", rule: 4, reason: "out of range above" };
+    return { action: "CLOSE", rule: 4, reason: formatCloseReason("OOR", "out of range above") };
   }
 
   const minAgeMinutes = Number(managementConfig.minAgeBeforeYieldCheck ?? 60);
@@ -395,7 +399,7 @@ export function evaluatePaperCloseRule(position, managementConfig = config.manag
   if (ageMinutes >= minAgeMinutes) {
     const apr = paperAnnualizedFeeApr(position);
     if (apr < managementConfig.minFeePerTvl24h) {
-      return { action: "CLOSE", rule: 5, reason: "low yield" };
+      return { action: "CLOSE", rule: 5, reason: formatCloseReason("Low Yield", `fee/TVL ${apr.toFixed(2)}% < min ${managementConfig.minFeePerTvl24h}% (age: ${Math.round(ageMinutes)}m)`) };
     }
   }
 

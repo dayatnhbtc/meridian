@@ -10,6 +10,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 import { repoPath } from "./repo-root.js";
+import { ensureCloseReasonLabel } from "./close-reasons.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -30,6 +31,14 @@ const PERFORMANCE_SIGNAL_FIELDS = [
   "entry_mcap",
   "entry_tvl",
   "entry_volume",
+  "entry_volume_change_pct",
+  "entry_fee_change_pct",
+  "entry_net_deposits",
+  "entry_price_change_pct",
+  "exit_volume_change_pct",
+  "exit_fee_change_pct",
+  "exit_net_deposits",
+  "exit_price_change_pct",
 ];
 const MAX_MANUAL_LESSON_LENGTH = 400;
 
@@ -96,6 +105,7 @@ function buildSignalSnapshot(perf) {
  */
 export async function recordPerformance(perf) {
   const data = load();
+  const closeReason = ensureCloseReasonLabel(perf.close_reason || "agent decision");
 
   // Guard against unit-mixed records where a SOL-sized final value is
   // accidentally written into a USD field (e.g. final_value_usd = 2 for a 2 SOL close).
@@ -121,7 +131,7 @@ export async function recordPerformance(perf) {
     ? (perf.minutes_in_range / perf.minutes_held) * 100
     : 0;
 
-  const closeReasonText = String(perf.close_reason || "").toLowerCase();
+  const closeReasonText = closeReason.toLowerCase();
   const suspiciousAbsurdClosedPnl =
     Number.isFinite(pnl_pct) &&
     perf.initial_value_usd >= 20 &&
@@ -136,6 +146,7 @@ export async function recordPerformance(perf) {
   const signalSnapshot = buildSignalSnapshot(perf);
   const entry = {
     ...perf,
+    close_reason: closeReason,
     signal_snapshot: signalSnapshot,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: Math.round(pnl_pct * 100) / 100,
@@ -172,15 +183,23 @@ export async function recordPerformance(perf) {
       fees_earned_usd: perf.fees_earned_usd,
       fees_earned_sol: perf.fees_earned_sol,
       fee_earned_pct: perf.initial_value_usd > 0 ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100 : null,
-      close_reason: perf.close_reason,
+      close_reason: closeReason,
       strategy: perf.strategy,
       volatility: perf.volatility,
       entry_mcap: perf.entry_mcap,
       entry_tvl: perf.entry_tvl,
       entry_volume: perf.entry_volume,
+      entry_volume_change_pct: perf.entry_volume_change_pct,
+      entry_fee_change_pct: perf.entry_fee_change_pct,
+      entry_net_deposits: perf.entry_net_deposits,
+      entry_price_change_pct: perf.entry_price_change_pct,
       exit_mcap: perf.exit_mcap,
       exit_tvl: perf.exit_tvl,
       exit_volume: perf.exit_volume,
+      exit_volume_change_pct: perf.exit_volume_change_pct,
+      exit_fee_change_pct: perf.exit_fee_change_pct,
+      exit_net_deposits: perf.exit_net_deposits,
+      exit_price_change_pct: perf.exit_price_change_pct,
     });
   }
 
@@ -245,8 +264,14 @@ function derivLesson(perf) {
   if (perf.entry_mcap != null || perf.entry_tvl != null || perf.entry_volume != null) {
     contextParts.push(`entry(mcap=${fmtNum(perf.entry_mcap)}, tvl=${fmtNum(perf.entry_tvl)}, vol=${fmtNum(perf.entry_volume)})`);
   }
+  if (perf.entry_volume_change_pct != null || perf.entry_fee_change_pct != null || perf.entry_net_deposits != null) {
+    contextParts.push(`entry_trend(vol_chg=${perf.entry_volume_change_pct ?? "?"}%, fee_chg=${perf.entry_fee_change_pct ?? "?"}%, net_dep=${fmtNum(perf.entry_net_deposits)})`);
+  }
   if (perf.exit_mcap != null || perf.exit_tvl != null || perf.exit_volume != null) {
     contextParts.push(`exit(mcap=${fmtNum(perf.exit_mcap)}, tvl=${fmtNum(perf.exit_tvl)}, vol=${fmtNum(perf.exit_volume)})`);
+  }
+  if (perf.exit_volume_change_pct != null || perf.exit_fee_change_pct != null || perf.exit_net_deposits != null) {
+    contextParts.push(`exit_trend(vol_chg=${perf.exit_volume_change_pct ?? "?"}%, fee_chg=${perf.exit_fee_change_pct ?? "?"}%, net_dep=${fmtNum(perf.exit_net_deposits)})`);
   }
   const context = contextParts.join(", ");
 
@@ -313,9 +338,17 @@ function derivLesson(perf) {
     entry_mcap: perf.entry_mcap ?? null,
     entry_tvl: perf.entry_tvl ?? null,
     entry_volume: perf.entry_volume ?? null,
+    entry_volume_change_pct: perf.entry_volume_change_pct ?? null,
+    entry_fee_change_pct: perf.entry_fee_change_pct ?? null,
+    entry_net_deposits: perf.entry_net_deposits ?? null,
+    entry_price_change_pct: perf.entry_price_change_pct ?? null,
     exit_mcap: perf.exit_mcap ?? null,
     exit_tvl: perf.exit_tvl ?? null,
     exit_volume: perf.exit_volume ?? null,
+    exit_volume_change_pct: perf.exit_volume_change_pct ?? null,
+    exit_fee_change_pct: perf.exit_fee_change_pct ?? null,
+    exit_net_deposits: perf.exit_net_deposits ?? null,
+    exit_price_change_pct: perf.exit_price_change_pct ?? null,
     created_at: new Date().toISOString(),
   };
 }

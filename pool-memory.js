@@ -8,6 +8,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { ensureCloseReasonLabel } from "./close-reasons.js";
 
 import { repoPath } from "./repo-root.js";
 
@@ -212,6 +213,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   }
 
   const entry = db[poolAddress];
+  const closeReason = ensureCloseReasonLabel(deployData.close_reason || "agent decision");
 
   const deploy = {
     deployed_at: deployData.deployed_at || null,
@@ -223,15 +225,23 @@ export function recordPoolDeploy(poolAddress, deployData) {
     fee_earned_pct: deployData.fee_earned_pct ?? null,
     range_efficiency: deployData.range_efficiency ?? null,
     minutes_held: deployData.minutes_held ?? null,
-    close_reason: deployData.close_reason || null,
+    close_reason: closeReason,
     strategy: deployData.strategy || null,
     volatility_at_deploy: deployData.volatility ?? null,
     entry_mcap: deployData.entry_mcap ?? null,
     entry_tvl: deployData.entry_tvl ?? null,
     entry_volume: deployData.entry_volume ?? null,
+    entry_volume_change_pct: deployData.entry_volume_change_pct ?? null,
+    entry_fee_change_pct: deployData.entry_fee_change_pct ?? null,
+    entry_net_deposits: deployData.entry_net_deposits ?? null,
+    entry_price_change_pct: deployData.entry_price_change_pct ?? null,
     exit_mcap: deployData.exit_mcap ?? null,
     exit_tvl: deployData.exit_tvl ?? null,
     exit_volume: deployData.exit_volume ?? null,
+    exit_volume_change_pct: deployData.exit_volume_change_pct ?? null,
+    exit_fee_change_pct: deployData.exit_fee_change_pct ?? null,
+    exit_net_deposits: deployData.exit_net_deposits ?? null,
+    exit_price_change_pct: deployData.exit_price_change_pct ?? null,
   };
 
   entry.deploys.push(deploy);

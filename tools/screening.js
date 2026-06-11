@@ -34,7 +34,39 @@ function scoreCandidate(pool) {
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  const activityPenalty = Number(pool.activity_score_penalty || 0);
+  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100 - activityPenalty;
+}
+
+/**
+ * Compute a market-adaptive minFeeActiveTvlRatio based on the current
+ * pool universe so the bar moves with market conditions instead of
+ * being a fixed threshold that lags behind.
+ *
+ * Uses the median (p50) of fee_active_tvl_ratio across all discovered
+ * pools as the target, clamped between the auto-evolved floor and a
+ * conservative ceiling to avoid over-restriction.
+ *
+ * Falls back to config floor when the sample is too small (< 5 pools).
+ */
+function computeAdaptiveFeeTvlThreshold(pools, configFloor) {
+  const floor = Number(configFloor ?? 0);
+  const feeValues = [];
+  for (const p of pools) {
+    const v = Number(p.fee_active_tvl_ratio);
+    if (Number.isFinite(v) && v >= 0) feeValues.push(v);
+  }
+  if (feeValues.length < 5) return floor;
+
+  feeValues.sort((a, b) => a - b);
+  const p50 = feeValues[Math.floor(feeValues.length / 2)];
+  const effective = Math.max(floor, p50);
+  const capped = Math.min(effective, 5.0); // ceiling: 500% fee/TVL
+
+  if (capped !== floor) {
+    log("screening", `Adaptive fee/TVL threshold: median=${p50.toFixed(2)}, effective=${capped.toFixed(2)} (config floor=${floor})`);
+  }
+  return Number(capped.toFixed(2));
 }
 
 function numeric(value) {
@@ -46,6 +78,55 @@ function numeric(value) {
 function isUsableVolatility(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0;
+}
+
+function classifyActivityTrend(pool) {
+  const volumeChange = numeric(pool?.volume_change_pct);
+  const feeChange = numeric(pool?.fee_change_pct);
+  const netDeposits = numeric(pool?.net_deposits);
+  const priceChange = numeric(pool?.pool_price_change_pct);
+
+  const coolingSignals = [
+    volumeChange != null && volumeChange <= -30,
+    feeChange != null && feeChange <= -30,
+    netDeposits != null && netDeposits < 0,
+  ].filter(Boolean).length;
+  const heatingSignals = [
+    volumeChange != null && volumeChange >= 30,
+    feeChange != null && feeChange >= 30,
+    netDeposits != null && netDeposits > 0,
+  ].filter(Boolean).length;
+
+  let trend = "stable";
+  if (coolingSignals >= 2) trend = "cooling";
+  else if (heatingSignals >= 2) trend = "heating";
+
+  const scorePenalty = trend === "cooling"
+    ? Math.min(500, Math.abs(volumeChange || 0) * 3 + Math.abs(feeChange || 0) * 3 + (netDeposits < 0 ? 100 : 0))
+    : 0;
+
+  return {
+    trend,
+    cooling: trend === "cooling",
+    score_penalty: Number(scorePenalty.toFixed(2)),
+    volume_change_pct: volumeChange,
+    fee_change_pct: feeChange,
+    net_deposits: netDeposits,
+    price_change_pct: priceChange,
+  };
+}
+
+function attachActivityTrend(pool) {
+  if (!pool) return pool;
+  const activity = classifyActivityTrend(pool);
+  pool.activity_trend = activity.trend;
+  pool.activity_cooling = activity.cooling;
+  pool.activity_score_penalty = activity.score_penalty;
+  pool.entry_volume_change_pct = activity.volume_change_pct;
+  pool.entry_fee_change_pct = activity.fee_change_pct;
+  pool.entry_net_deposits = activity.net_deposits;
+  pool.entry_price_change_pct = activity.price_change_pct;
+  return pool;
 }
 
 export function evaluateTvlMcapRisk({ tvl, mcap, volatility }, s = config.screening) {
@@ -105,6 +186,57 @@ export function evaluateTvlMcapRisk({ tvl, mcap, volatility }, s = config.screen
     level: "ok",
     hardReject: false,
     reason: null,
+  };
+}
+
+export function evaluateBotHolderRisk({ botPct, organic, top10Pct, tvl, feeActiveTvlRatio }, s = config.screening) {
+  const botValue = numeric(botPct);
+  const hardPct = numeric(s?.maxBotHoldersPct) ?? 35;
+  const cautionPct = numeric(s?.botHoldersCautionPct) ?? 30;
+
+  if (botValue == null) {
+    return { level: "unknown", reject: false, reason: null };
+  }
+
+  if (botValue > hardPct) {
+    return {
+      level: "critical",
+      reject: true,
+      reason: `bot holders ${botValue}% > hard max ${hardPct}%`,
+    };
+  }
+
+  if (botValue <= cautionPct) {
+    return { level: "ok", reject: false, reason: null };
+  }
+
+  const organicValue = numeric(organic);
+  const top10Value = numeric(top10Pct);
+  const tvlValue = numeric(tvl);
+  const feeActiveTvlValue = numeric(feeActiveTvlRatio);
+  const minOrganic = numeric(s?.botHoldersCautionMinOrganic) ?? 80;
+  const maxTop10 = numeric(s?.botHoldersCautionMaxTop10Pct) ?? 20;
+  const minTvl = numeric(s?.botHoldersCautionMinTvl) ?? 100_000;
+  const minFeeActiveTvlRatio = numeric(s?.botHoldersCautionMinFeeActiveTvlRatio) ?? 1.0;
+  const failures = [];
+
+  if (organicValue == null || organicValue <= minOrganic) failures.push(`organic ${organicValue ?? "unknown"} <= ${minOrganic}`);
+  if (top10Value == null || top10Value >= maxTop10) failures.push(`top10 ${top10Value ?? "unknown"}% >= ${maxTop10}%`);
+  if (tvlValue == null || tvlValue <= minTvl) failures.push(`TVL ${tvlValue ?? "unknown"} <= ${minTvl}`);
+  if (feeActiveTvlValue == null || feeActiveTvlValue <= minFeeActiveTvlRatio) failures.push(`fee/active-TVL ${feeActiveTvlValue ?? "unknown"} <= ${minFeeActiveTvlRatio}`);
+
+  if (failures.length > 0) {
+    return {
+      level: "caution_reject",
+      reject: true,
+      reason: `bot holders ${botValue}% in caution zone ${cautionPct}-${hardPct}% but failed: ${failures.join(", ")}`,
+    };
+  }
+
+  return {
+    level: "caution_pass",
+    reject: false,
+    reason: `bot holders ${botValue}% in caution zone ${cautionPct}-${hardPct}% passed quality gates`,
   };
 }
 
@@ -540,7 +672,7 @@ export async function discoverPools({
     return false;
   });
 
-  const condensed = thresholdedRawPools.map(condensePool);
+  const condensed = thresholdedRawPools.map((pool) => condensePool(attachActivityTrend(pool)));
 
   // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
   let pools = condensed.filter((p) => {
@@ -615,7 +747,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
-  const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
+  const configFeeTvlFloor = Number(config.screening.minFeeActiveTvlRatio ?? 0);
+  const minFeeActiveTvlRatio = computeAdaptiveFeeTvlThreshold(pools, configFeeTvlFloor);
 
   const eligible = pools
     .filter((p) => {
@@ -630,7 +763,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
       if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
-        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
+        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below adaptive minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
         return false;
       }
       if (!isUsableVolatility(p.volatility)) {
@@ -826,6 +959,10 @@ export function condensePool(p) {
     // Activity trends
     volume_change_pct: fix(p.volume_change_pct, 1),
     fee_change_pct: fix(p.fee_change_pct, 1),
+    net_deposits: round(p.net_deposits),
+    activity_trend: p.activity_trend || classifyActivityTrend(p).trend,
+    activity_cooling: p.activity_cooling ?? classifyActivityTrend(p).cooling,
+    activity_score_penalty: p.activity_score_penalty ?? classifyActivityTrend(p).score_penalty,
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
   };

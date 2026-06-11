@@ -21,6 +21,7 @@ import {
   recordClose,
   getTrackedPosition,
   minutesOutOfRange,
+  totalMinutesOutOfRange,
   syncOpenPositions,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
@@ -31,6 +32,7 @@ import { openPaperPosition } from "../paper-positions.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { assertLiveTradingAllowed } from "../safety.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { ensureCloseReasonLabel } from "../close-reasons.js";
 import { EVIL_PANDA_PRESET_ID, applyEvilPandaDeployDefaults } from "../evil-panda.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -490,6 +492,10 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  entry_volume_change_pct,
+  entry_fee_change_pct,
+  entry_net_deposits,
+  entry_price_change_pct,
 }) {
   pool_address = normalizeMint(pool_address);
 
@@ -784,6 +790,10 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          entry_volume_change_pct,
+          entry_fee_change_pct,
+          entry_net_deposits,
+          entry_price_change_pct,
         });
       }
 
@@ -926,6 +936,10 @@ export async function deployPosition({
       entry_tvl,
       entry_volume,
       entry_holders,
+      entry_volume_change_pct,
+      entry_fee_change_pct,
+      entry_net_deposits,
+      entry_price_change_pct,
     });
 
     appendDecision({
@@ -1418,6 +1432,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             : null,
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
+          total_minutes_out_of_range: totalMinutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
         });
       }
@@ -1591,8 +1606,9 @@ export async function claimFees({ position_address }) {
 // ─── Close Position ────────────────────────────────────────────
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
+  const closeReason = ensureCloseReasonLabel(reason || "agent decision");
   if (process.env.DRY_RUN === "true") {
-    return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
+    return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent", reason: closeReason };
   }
 
   const tracked = getTrackedPosition(position_address);
@@ -1704,7 +1720,7 @@ export async function closePosition({ position_address, reason }) {
         };
       }
 
-      recordClose(position_address, reason || "agent decision");
+      recordClose(position_address, closeReason);
 
       if (tracked) {
         const deployedAt = new Date(tracked.deployed_at).getTime();
@@ -1760,6 +1776,10 @@ export async function closePosition({ position_address, reason }) {
               exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
               exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
               exit_volume: parseFloat(ep?.volume) || null,
+              exit_volume_change_pct: parseFloat(ep?.volume_change_pct) || null,
+              exit_fee_change_pct: parseFloat(ep?.fee_change_pct) || null,
+              exit_net_deposits: parseFloat(ep?.net_deposits) || null,
+              exit_price_change_pct: parseFloat(ep?.pool_price_change_pct) || null,
             };
           }
         } catch { /* non-blocking */ }
@@ -1779,14 +1799,18 @@ export async function closePosition({ position_address, reason }) {
           fees_earned_usd: feesUsd,
           final_value_usd: finalValueUsd,
           initial_value_usd: initialUsd,
-          minutes_in_range: minutesHeld - minutesOOR,
+          minutes_in_range: Math.max(0, minutesHeld - totalMinutesOutOfRange(position_address)),
           minutes_held: minutesHeld,
-          close_reason: reason || "agent decision",
+          close_reason: closeReason,
           signal_snapshot: signalSnapshot,
           entry_mcap: tracked.entry_mcap ?? null,
           entry_tvl: tracked.entry_tvl ?? null,
           entry_volume: tracked.entry_volume ?? null,
           entry_holders: tracked.entry_holders ?? null,
+          entry_volume_change_pct: tracked.entry_volume_change_pct ?? null,
+          entry_fee_change_pct: tracked.entry_fee_change_pct ?? null,
+          entry_net_deposits: tracked.entry_net_deposits ?? null,
+          entry_price_change_pct: tracked.entry_price_change_pct ?? null,
           ...exitMarket,
         });
 
@@ -1797,7 +1821,7 @@ export async function closePosition({ position_address, reason }) {
           pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
           position: position_address,
           summary: `Relay closed at ${pnlPct.toFixed(2)}%`,
-          reason: reason || "agent decision",
+          reason: closeReason,
           risks: [
             minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
             tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
@@ -1833,7 +1857,7 @@ export async function closePosition({ position_address, reason }) {
         pool_name: poolMeta.name || poolAddress.slice(0, 8),
         position: position_address,
         summary: "Relay closed position",
-        reason: reason || "agent decision",
+        reason: closeReason,
         metrics: {},
       });
 
@@ -1964,7 +1988,7 @@ export async function closePosition({ position_address, reason }) {
       };
     }
 
-    recordClose(position_address, reason || "agent decision");
+    recordClose(position_address, closeReason);
 
     // Record performance for learning
     if (tracked) {
@@ -1992,6 +2016,10 @@ export async function closePosition({ position_address, reason }) {
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      let pnlSol = 0;
+      let pnlSolPct = 0;
+      let pnlUsdAlways = 0;
+      let pnlUsdAlwaysPct = 0;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -2007,7 +2035,7 @@ export async function closePosition({ position_address, reason }) {
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
               const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
 
-              if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
+              if (shouldRejectClosedPnl(nextPnlPct, closeReason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
               } else {
                 pnlTrueUsd    = nextPnlUsd;
@@ -2016,8 +2044,22 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
-                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} ${config.management.solMode ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
-                break;
+        // Always compute both USD and SOL PnL for transparent reporting
+      pnlSol = config.management.solMode
+        ? nextPnlValue  // already in SOL from getClosedPnlValue(posEntry, true)
+        : getClosedPnlValue(posEntry, true);
+      pnlSolPct = config.management.solMode
+        ? nextPnlPct
+        : getClosedPnlPct(posEntry, true);
+      pnlUsdAlways = !config.management.solMode
+        ? nextPnlValue
+        : safeNum(posEntry.pnlUsd) ?? safeNum(posEntry?.pnl?.value) ?? 0;
+      pnlUsdAlwaysPct = !config.management.solMode
+        ? nextPnlPct
+        : getClosedPnlPct(posEntry, false);
+
+      log("close", `Closed PnL: sol=${pnlSol.toFixed(6)} SOL (${pnlSolPct.toFixed(2)}%), usd=${pnlUsdAlways.toFixed(2)} USD (${pnlUsdAlwaysPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
+      break;
               }
             } else {
               log("close_warn", `Position not found in status=closed response (attempt ${attempt + 1}/6) — may still be settling`);
@@ -2046,6 +2088,11 @@ export async function closePosition({ position_address, reason }) {
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
+          // Populate SOL/USD PnL from fallback values
+          pnlSol = config.management.solMode ? pnlUsd : 0;
+          pnlSolPct = config.management.solMode ? pnlPct : 0;
+          pnlUsdAlways = config.management.solMode ? 0 : pnlUsd;
+          pnlUsdAlwaysPct = config.management.solMode ? 0 : pnlPct;
         }
       }
 
@@ -2065,6 +2112,10 @@ export async function closePosition({ position_address, reason }) {
             exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
             exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
             exit_volume: parseFloat(ep?.volume) || null,
+            exit_volume_change_pct: parseFloat(ep?.volume_change_pct) || null,
+            exit_fee_change_pct: parseFloat(ep?.fee_change_pct) || null,
+            exit_net_deposits: parseFloat(ep?.net_deposits) || null,
+            exit_price_change_pct: parseFloat(ep?.pool_price_change_pct) || null,
           };
         }
       } catch { /* non-blocking */ }
@@ -2084,14 +2135,18 @@ export async function closePosition({ position_address, reason }) {
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
-        minutes_in_range: minutesHeld - minutesOOR,
+        minutes_in_range: Math.max(0, minutesHeld - totalMinutesOutOfRange(position_address)),
         minutes_held: minutesHeld,
-        close_reason: reason || "agent decision",
+        close_reason: closeReason,
         signal_snapshot: signalSnapshot,
         entry_mcap: tracked.entry_mcap ?? null,
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
+        entry_volume_change_pct: tracked.entry_volume_change_pct ?? null,
+        entry_fee_change_pct: tracked.entry_fee_change_pct ?? null,
+        entry_net_deposits: tracked.entry_net_deposits ?? null,
+        entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         ...exitMarket,
       });
 
@@ -2102,7 +2157,7 @@ export async function closePosition({ position_address, reason }) {
         pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
         position: position_address,
         summary: `Closed at ${pnlPct.toFixed(2)}%`,
-        reason: reason || "agent decision",
+        reason: closeReason,
         risks: [
           minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
           tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
@@ -2123,9 +2178,13 @@ export async function closePosition({ position_address, reason }) {
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
-        pnl_usd: pnlUsd,
-        pnl_pct: pnlPct,
+        pnl_usd: pnlUsdAlways,
+        pnl_sol: pnlSol,
+        pnl_usd_pct: pnlUsdAlwaysPct,
+        pnl_sol_pct: pnlSolPct,
+        pnl_pct: config.management.solMode ? pnlSolPct : pnlUsdAlwaysPct,
         base_mint: closeBaseMint,
+        close_reason: closeReason,
       };
     }
 
@@ -2136,7 +2195,7 @@ export async function closePosition({ position_address, reason }) {
       pool_name: poolMeta.name || poolAddress.slice(0, 8),
       position: position_address,
       summary: "Closed position",
-      reason: reason || "agent decision",
+      reason: closeReason,
       metrics: {},
     });
 
@@ -2149,6 +2208,7 @@ export async function closePosition({ position_address, reason }) {
       close_txs: closeTxHashes,
       txs: txHashes,
       base_mint: pool.lbPair.tokenXMint.toString(),
+      close_reason: closeReason,
     };
   } catch (error) {
     log("close_error", error.message);

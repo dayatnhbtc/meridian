@@ -88,7 +88,12 @@ export const config = {
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
-    maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
+    maxBotHoldersPct:  u.maxBotHoldersPct  ?? 35,  // hard reject bot holder addresses % (Jupiter audit)
+    botHoldersCautionPct: u.botHoldersCautionPct ?? 30, // caution zone starts above this bot-holder %
+    botHoldersCautionMinOrganic: u.botHoldersCautionMinOrganic ?? 80,
+    botHoldersCautionMaxTop10Pct: u.botHoldersCautionMaxTop10Pct ?? 20,
+    botHoldersCautionMinTvl: u.botHoldersCautionMinTvl ?? 100_000,
+    botHoldersCautionMinFeeActiveTvlRatio: u.botHoldersCautionMinFeeActiveTvlRatio ?? 1.0,
     maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
@@ -281,6 +286,11 @@ export function reloadScreeningThresholds() {
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.botHoldersCautionPct != null) s.botHoldersCautionPct = fresh.botHoldersCautionPct;
+    if (fresh.botHoldersCautionMinOrganic != null) s.botHoldersCautionMinOrganic = fresh.botHoldersCautionMinOrganic;
+    if (fresh.botHoldersCautionMaxTop10Pct != null) s.botHoldersCautionMaxTop10Pct = fresh.botHoldersCautionMaxTop10Pct;
+    if (fresh.botHoldersCautionMinTvl != null) s.botHoldersCautionMinTvl = fresh.botHoldersCautionMinTvl;
+    if (fresh.botHoldersCautionMinFeeActiveTvlRatio != null) s.botHoldersCautionMinFeeActiveTvlRatio = fresh.botHoldersCautionMinFeeActiveTvlRatio;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;

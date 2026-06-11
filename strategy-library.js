@@ -46,7 +46,7 @@ const DEFAULT_STRATEGIES = {
     token_criteria: { notes: "Volatile tokens with strong narrative. Must have active volume." },
     entry: { condition: "Deploy token-only (amount_x only, amount_y=0) bid-ask, bins below active bin only", single_side: "token", notes: "As price drops through bins, token sold for SOL. Bid-ask concentrates at bottom edge." },
     range: { type: "default", bins_below_pct: 100, notes: "All bins below active bin. bins_above=0." },
-    exit: { notes: "When OOR downside: close_position(skip_swap=true) → redeploy token-only bid-ask at new lower price. Do NOT swap to SOL. Full close only when token dead or after N re-seeds with declining performance." },
+    exit: { take_profit_pct: 5, notes: "When OOR downside: close_position(skip_swap=true) → redeploy token-only bid-ask at new lower price. Do NOT swap to SOL. Full close only when token dead or after N re-seeds with declining performance." },
     best_for: "Riding volatile tokens down without cutting losses. DCA out via LP.",
   },
   fee_compounding: {
@@ -225,4 +225,22 @@ export function getActiveStrategy() {
   const db = load();
   if (!db.active || !db.strategies[db.active]) return null;
   return db.strategies[db.active];
+}
+
+export function getTakeProfitPctForLpStrategy(lpStrategy) {
+  const strategyName = String(lpStrategy || "").toLowerCase();
+  if (!strategyName) return null;
+  const db = load();
+  const strategies = Object.values(db.strategies || {});
+  const active = db.active ? db.strategies?.[db.active] : null;
+  const candidates = [active, ...strategies]
+    .filter(Boolean)
+    .filter((strategy, index, arr) => arr.findIndex((s) => s.id === strategy.id) === index)
+    .filter((strategy) => String(strategy.lp_strategy || "").toLowerCase() === strategyName);
+
+  for (const strategy of candidates) {
+    const value = Number(strategy.exit?.take_profit_pct);
+    if (Number.isFinite(value)) return value;
+  }
+  return null;
 }

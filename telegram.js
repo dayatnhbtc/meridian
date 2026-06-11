@@ -1,8 +1,10 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { getTrackedPosition } from "./state.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
+const OFFSET_PATH = repoPath(".telegram-offset");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
 const BASE  = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
@@ -17,6 +19,11 @@ let chatId = null;
 let _offset  = 0;
 let _polling = false;
 let _liveMessageDepth = 0;
+const _activeLiveMessages = new Set();
+
+// Persist Telegram update offset so /stop doesn't replay on restart
+try { const raw = fs.readFileSync(OFFSET_PATH, "utf8"); _offset = parseInt(raw, 10) || 0; } catch {}
+function saveOffset() { try { fs.writeFileSync(OFFSET_PATH, String(_offset)); } catch {} }
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
@@ -146,44 +153,70 @@ async function postTelegramRaw(method, body) {
 
 export async function sendMessage(text) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
+  // Convert markdown-style formatting to HTML for Telegram
+  const html = String(text)
+    .slice(0, 4096)
+    .replace(/\*\*(.+?)\*\*/gs, '<b>$1</b>')     // **bold** → <b>bold</b>
+    .replace(/`([^`]+)`/g, '<code>$1</code>');      // `code` → <code>code</code>
+  return postTelegram("sendMessage", { text: html, parse_mode: "HTML" });
 }
 
 export async function sendMessageWithButtons(text, inlineKeyboard) {
   if (!TOKEN || !chatId) return;
+  const html = String(text)
+    .slice(0, 4096)
+    .replace(/\*\*(.+?)\*\*/gs, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
   return postTelegram("sendMessage", {
-    text: String(text).slice(0, 4096),
+    text: html,
+    parse_mode: "HTML",
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }
 
+export function escapeHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  const safe = String(html).replace(/"/g, "&quot;").slice(0, 4096);
+  return postTelegram("sendMessage", { text: safe, parse_mode: "HTML" });
 }
 
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const html = String(text)
+    .slice(0, 4096)
+    .replace(/\*\*(.+?)\*\*/gs, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: html,
+    parse_mode: "HTML",
   });
 }
 
 export async function editHTML(html, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const safe = String(html).replace(/"/g, "&quot;").slice(0, 4096);
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(html).slice(0, 4096),
+    text: safe,
     parse_mode: "HTML",
   });
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const html = String(text)
+    .slice(0, 4096)
+    .replace(/\*\*(.+?)\*\*/gs, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: html,
+    parse_mode: "HTML",
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }
@@ -334,10 +367,18 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
     scheduleFlush();
   }
 
+  function finishLiveMessage(handle) {
+    if (state.done) return;
+    state.done = true;
+    _activeLiveMessages.delete(handle);
+    _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
+    typing.stop();
+  }
+
   _liveMessageDepth += 1;
   await flushNow();
 
-  return {
+  const handle = {
     async toolStart(name) {
       await upsertToolLine(name, "ℹ️", "...");
     },
@@ -358,8 +399,7 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
       if (state.flushPromise) await state.flushPromise;
       state.footer = finalText;
       await flushNow();
-      _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
-      typing.stop();
+      finishLiveMessage(handle);
     },
     async fail(errorText) {
       if (state.flushTimer) {
@@ -369,10 +409,17 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
       if (state.flushPromise) await state.flushPromise;
       state.footer = `❌ ${errorText}`;
       await flushNow();
-      _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
-      typing.stop();
+      finishLiveMessage(handle);
     },
   };
+
+  _activeLiveMessages.add(handle);
+  return handle;
+}
+
+export async function failActiveLiveMessages(reason = "Interrupted before completion.") {
+  const handles = [..._activeLiveMessages];
+  await Promise.allSettled(handles.map((handle) => handle.fail(reason)));
 }
 
 
@@ -388,6 +435,7 @@ async function poll(onMessage) {
       const data = await res.json();
       for (const update of data.result || []) {
         _offset = update.update_id + 1;
+        saveOffset();
         const callback = update.callback_query;
         if (callback?.data && callback?.message) {
           const callbackMsg = {
@@ -424,8 +472,8 @@ export const BOT_COMMANDS = [
   { command: "status",     description: "Wallet + rich portfolio snapshot" },
   { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
   { command: "positions",  description: "Rich open-position report" },
-  { command: "pnl",        description: "Today PnL snapshot" },
-  { command: "pnltoday",   description: "Alias for today's PnL" },
+  { command: "pnl",        description: "Today PnL summary" },
+  { command: "pnltoday",   description: "Today PnL detail" },
   { command: "paper",      description: "List paper simulator PnL" },
   { command: "paperclose", description: "Close paper position by index" },
   { command: "pool",       description: "Detailed info for one open position" },
@@ -440,6 +488,7 @@ export const BOT_COMMANDS = [
   { command: "candidates", description: "Show latest cached candidates" },
   { command: "deploy",     description: "Deploy candidate by cached index" },
   { command: "briefing",   description: "Morning briefing" },
+  { command: "lessons",    description: "List learned lessons" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
@@ -460,13 +509,26 @@ async function registerCommands() {
   }
 }
 
-export function startPolling(onMessage) {
+export async function startPolling(onMessage) {
   if (!TOKEN) return;
   loadChatId();
   if (!chatId) {
     log("telegram_warn", "TELEGRAM_CHAT_ID not set in .env or user-config.telegramChatId — outbound notifications and inbound control disabled until configured.");
   }
   _polling = true;
+  // Flush any stale updates queued while the bot was offline
+  try {
+    const flush = await fetch(`${BASE}/getUpdates?offset=-1&timeout=1`, { signal: AbortSignal.timeout(3000) });
+    if (flush.ok) {
+      const data = await flush.json();
+      const updates = data.result || [];
+      if (updates.length > 0) {
+        _offset = Math.max(_offset, updates[updates.length - 1].update_id + 1);
+        saveOffset();
+        log("telegram", `Flushed ${updates.length} stale update(s) on startup`);
+      }
+    }
+  } catch { /* best-effort */ }
   poll(onMessage); // fire-and-forget
   registerCommands();
   log("telegram", "Bot polling started");
@@ -489,7 +551,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
   await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
+    `✅ <b>Deployed</b> ${escapeHtml(pair)}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     coverageStr +
@@ -499,13 +561,81 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlUsdPct, pnlSolPct, pnlPct, reason, positionAddress }) {
   if (hasActiveLiveMessage()) return;
-  const sign = pnlUsd >= 0 ? "+" : "";
-  await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
-  );
+
+  // Look up tracked position for extra data
+  let tracked = null;
+  if (positionAddress) {
+    tracked = getTrackedPosition(positionAddress);
+  }
+
+  const solMode = !!tracked?.amount_sol;
+  const netSol = (pnlSol ?? 0);
+  const netUsdRaw = (pnlUsd ?? 0);
+  const feesUsd = tracked?.total_fees_claimed_usd ?? 0;
+  const netUsdTotal = netUsdRaw + feesUsd;
+  const netSign = netUsdRaw >= 0 ? "+" : "";
+  const netLabel = netUsdRaw >= 0 ? "✅" : "❌";
+  const netTotalSign = netUsdTotal >= 0 ? "+" : "";
+  const netTotalLabel = netUsdTotal >= 0 ? "✅" : "❌";
+
+  // SOL PnL line
+  const solSign = netSol >= 0 ? "+" : "";
+  const solLabel = netSol >= 0 ? "✅" : "❌";
+
+  // USD PnL line
+  const usdSign = netUsdRaw >= 0 ? "+" : "";
+  const usdLabel = netUsdRaw >= 0 ? "✅" : "❌";
+
+  // Duration & in-range
+  let durationStr = "?";
+  let inRangePct = null;
+  if (tracked?.deployed_at) {
+    const heldMs = Date.now() - new Date(tracked.deployed_at).getTime();
+    const heldMin = Math.floor(heldMs / 60000);
+    const h = Math.floor(heldMin / 60);
+    const m = heldMin % 60;
+    durationStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+
+    const storedOorMin = Math.max(0, Number(tracked.total_minutes_out_of_range) || 0);
+    const currentOorMin = tracked.out_of_range_since
+      ? Math.max(0, Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000))
+      : 0;
+    const totalOorMin = storedOorMin + currentOorMin;
+    const inRangeMin = Math.max(0, heldMin - totalOorMin);
+    inRangePct = heldMin > 0 ? Math.round((inRangeMin / heldMin) * 100) : 100;
+  }
+  const inRangeIcon = inRangePct !== null && inRangePct >= 80 ? "🎯" : "⚠️";
+  const inRangeStr = inRangePct !== null ? `${inRangePct}% In-Range ${inRangeIcon}` : "";
+
+  // Exit reason (HTML-safe)
+  const rawExit = reason || tracked?.notes?.filter(n => n.includes("Closed"))?.pop()?.replace(/^Closed at[^:]+:\s*/, "") || "agent decision";
+  const exitLabel = rawExit.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // Meta
+  const metaParts = [];
+  if (tracked?.volatility != null) metaParts.push(`vol = ${tracked.volatility}`);
+  if (tracked?.fee_tvl_ratio != null) metaParts.push(`fee/TVL = ${tracked.fee_tvl_ratio}%`);
+  const metaStr = metaParts.length > 0 ? `📊 Meta : ${metaParts.join(" | ")}` : "";
+
+  const icon = netSol >= 0 ? "🟢" : "🔴";
+
+  const lines = [
+    `${icon} <b>CLOSED</b> | ${escapeHtml(pair)}`,
+    `◎ ${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}`,
+    `💵 ${usdSign}$${(pnlUsd ?? 0).toFixed(2)} (${usdSign}${(pnlUsdPct ?? 0).toFixed(2)}%) ${usdLabel}`,
+    `💰 Net : ${netTotalSign}$${netUsdTotal.toFixed(2)} ${netTotalLabel}`,
+  ];
+  // Fees if any
+  if (tracked?.total_fees_claimed_usd > 0) {
+    lines.splice(3, 0, `💸 Fees : $${tracked.total_fees_claimed_usd.toFixed(2)}`);
+  }
+  lines.push(`🤖 Exit : ${exitLabel}`);
+  lines.push(`⏱️ Duration : ${durationStr}${inRangeStr ? ` | ${inRangeStr}` : ""}`);
+  if (metaStr) lines.push(metaStr);
+
+  await sendHTML(lines.join("\n"));
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
@@ -520,7 +650,7 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
+    `⚠️ <b>Out of Range</b> ${escapeHtml(pair)}\n` +
     `Been OOR for ${minutesOOR} minutes`
   );
 }

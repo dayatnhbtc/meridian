@@ -171,6 +171,10 @@ async function validateDeployPoolThresholds(args) {
     entry_tvl: tvl,
     entry_volume: numberOrNull(detail?.volume),
     entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
+    entry_volume_change_pct: numberOrNull(detail?.volume_change_pct),
+    entry_fee_change_pct: numberOrNull(detail?.fee_change_pct),
+    entry_net_deposits: numberOrNull(detail?.net_deposits),
+    entry_price_change_pct: numberOrNull(detail?.pool_price_change_pct),
   };
 
   return { pass: true, entryMarketData };
@@ -652,7 +656,7 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlSol: result.pnl_sol ?? 0, pnlUsdPct: result.pnl_usd_pct ?? 0, pnlSolPct: result.pnl_sol_pct ?? 0, pnlPct: result.pnl_pct ?? 0, reason: result.close_reason, positionAddress: args.position_address }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;

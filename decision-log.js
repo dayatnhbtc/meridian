@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { ensureCloseReasonLabel } from "./close-reasons.js";
 
 const DECISION_LOG_FILE = repoPath("decision-log.json");
 const MAX_DECISIONS = 100;
@@ -28,16 +29,20 @@ function sanitize(value, maxLen = 280) {
 
 export function appendDecision(entry) {
   const data = load();
+  const type = entry.type || "note";
+  const reason = type === "close"
+    ? ensureCloseReasonLabel(entry.reason || "agent decision")
+    : entry.reason;
   const decision = {
     id: `dec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     ts: new Date().toISOString(),
-    type: entry.type || "note",
+    type,
     actor: entry.actor || "GENERAL",
     pool: entry.pool || null,
     pool_name: sanitize(entry.pool_name || entry.pool, 120),
     position: entry.position || null,
     summary: sanitize(entry.summary),
-    reason: sanitize(entry.reason, 500),
+    reason: sanitize(reason, 500),
     risks: Array.isArray(entry.risks) ? entry.risks.map((r) => sanitize(r, 140)).filter(Boolean).slice(0, 6) : [],
     metrics: entry.metrics || {},
     rejected: Array.isArray(entry.rejected) ? entry.rejected.map((r) => sanitize(r, 180)).filter(Boolean).slice(0, 8) : [],

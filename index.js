@@ -8,13 +8,14 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, evaluateBotHolderRisk } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
+  failActiveLiveMessages,
   sendMessage,
   sendMessageWithButtons,
   sendHTML,
@@ -25,10 +26,11 @@ import {
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
-import { generateBriefing } from "./briefing.js";
+import { generateBriefing, generateLessonsReport } from "./briefing.js";
 import { tickPaperPositions, listPaperPositions, getPaperPosition, closePaperPosition } from "./paper-positions.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
+import { getTakeProfitPctForLpStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -36,7 +38,8 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
-import { formatPortfolioReport, formatScreeningSkipReport, formatDailyPnlReport, escapeHtml } from "./report-format.js";
+import { formatPortfolioReport, formatScreeningSkipReport, formatDailyPnlReport, formatScreeningAgentReport, escapeHtml } from "./report-format.js";
+import { formatCloseReason } from "./close-reasons.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -176,7 +179,14 @@ async function runBriefing() {
   try {
     const briefing = await generateBriefing();
     if (telegramEnabled()) {
-      await sendHTML(briefing);
+      const sent = await sendHTML(briefing);
+      if (!sent?.ok) {
+        log("cron_error", "Morning briefing Telegram send failed; will retry via watchdog");
+        return;
+      }
+      log("cron", "Morning briefing sent to Telegram");
+    } else {
+      log("cron", "Morning briefing generated but Telegram is disabled");
     }
     setLastBriefingDate();
   } catch (error) {
@@ -221,7 +231,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", { parseMode: "HTML" });
+      liveMessage = await createLiveMessage("🧭 <b>Management Cycle</b>", "Fetching portfolio and checking deterministic rules...", { parseMode: "HTML" });
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -309,9 +319,10 @@ Mode: DRY RUN paper simulator — live wallet has no on-chain LP position.`;
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
-    const cur = config.management.solMode ? "◎" : "$";
     mgmtReport = formatPortfolioReport(positionData, actionMap, {
+      title: "Portfolio 💼",
       solMode: config.management.solMode,
+      maxPositions: config.risk.maxPositions,
       actionSummary,
     });
 
@@ -323,6 +334,7 @@ Mode: DRY RUN paper simulator — live wallet has no on-chain LP position.`;
 
     if (actionPositions.length > 0) {
       log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
+      const cur = config.management.solMode ? "◎" : "💵";
 
       const actionBlocks = actionPositions.map((p) => {
         const act = actionMap.get(p.position);
@@ -379,7 +391,7 @@ After executing, write a brief one-line result per position.
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendHTML(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendHTML(`🧭 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -452,7 +464,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     return screenReport;
   }
   if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
+    liveMessage = await createLiveMessage("🔍 <b>Screening Cycle</b>", "Scanning candidates...", { parseMode: "HTML" });
   }
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
@@ -505,12 +517,20 @@ export async function runScreeningCycle({ silent = false } = {}) {
         filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
         return false;
       }
-      const botPct = ti?.audit?.bot_holders_pct;
-      const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+      const botRisk = evaluateBotHolderRisk({
+        botPct: ti?.audit?.bot_holders_pct,
+        organic: pool.organic_score ?? pool.base?.organic ?? ti?.organic_score,
+        top10Pct: ti?.audit?.top_holders_pct,
+        tvl: pool.tvl ?? pool.active_tvl,
+        feeActiveTvlRatio: pool.fee_active_tvl_ratio,
+      });
+      if (botRisk.reject) {
+        log("screening", `Bot-holder filter: dropped ${pool.name} — ${botRisk.reason}`);
+        filteredOut.push({ name: pool.name, reason: botRisk.reason });
         return false;
+      }
+      if (botRisk.level === "caution_pass") {
+        log("screening", `Bot-holder caution: allowing ${pool.name} — ${botRisk.reason}`);
       }
       return true;
     });
@@ -602,6 +622,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           organic_score:         pool.organic_score         ?? null,
           fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
           volume:                pool.volume_window         ?? null,
+          volume_change_pct:     pool.volume_change_pct     ?? null,
           mcap:                  pool.mcap                  ?? null,
           holder_count:          ti?.holders                ?? null,
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
@@ -718,8 +739,12 @@ IMPORTANT:
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        const strippedScreenReport = stripThink(screenReport);
+        const formattedScreenReport = /<\/?(?:b|i|pre)>/.test(strippedScreenReport)
+          ? strippedScreenReport
+          : formatScreeningAgentReport(strippedScreenReport);
+        if (liveMessage) await liveMessage.finalize(formattedScreenReport).catch(() => {});
+        else sendHTML(formattedScreenReport || `🔍 <b>Screening Cycle</b>\n\n${escapeHtml(strippedScreenReport)}`).catch(() => { });
       }
     }
   }
@@ -857,6 +882,7 @@ async function shutdown(signal) {
   _shuttingDown = true;
 
   log("shutdown", `Received ${signal}. Shutting down...`);
+  await failActiveLiveMessages(`Interrupted by ${signal}; PM2 is restarting Meridian.`).catch(() => {});
   stopPolling();
   stopCronJobs();
 
@@ -931,17 +957,21 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: formatCloseReason("SL", `PnL ${Number(position.pnl_pct).toFixed(2)}% <= stopLossPct ${managementConfig.stopLossPct}%`) };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+  const strategyName = position.strategy || tracked?.strategy;
+  const strategyTakeProfitPct = getTakeProfitPctForLpStrategy(strategyName);
+  const takeProfitPct = strategyTakeProfitPct ?? managementConfig.takeProfitPct;
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= takeProfitPct) {
+    const strategyLabel = strategyName ? ` (${strategyName})` : "";
+    return { action: "CLOSE", rule: 2, reason: formatCloseReason("TP", `PnL ${Number(position.pnl_pct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`) };
   }
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 3, reason: formatCloseReason("OOR", `active bin ${position.active_bin} above upper range ${position.upper_bin}`) };
   }
   if (
     position.active_bin != null &&
@@ -949,14 +979,14 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin > position.upper_bin &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    return { action: "CLOSE", rule: 4, reason: formatCloseReason("OOR", `out of range ${position.minutes_out_of_range ?? 0}m (limit: ${managementConfig.outOfRangeWaitMinutes}m)`) };
   }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    return { action: "CLOSE", rule: 5, reason: formatCloseReason("Low Yield", `fee/TVL ${Number(position.fee_per_tvl_24h).toFixed(2)}% < min ${managementConfig.minFeePerTvl24h}% (age: ${position.age_minutes ?? "?"}m)`) };
   }
   return null;
 }
@@ -1039,14 +1069,16 @@ function dateKeyInTimezone(date, timeZone = "Asia/Jakarta") {
   }).format(date);
 }
 
-function buildTodayPnlReport({ positions = [], now = new Date(), timeZone = "Asia/Jakarta" } = {}) {
+function buildTodayPnlReport({ positions = [], now = new Date(), timeZone = "Asia/Jakarta", compact = false } = {}) {
   const todayKey = dateKeyInTimezone(now, timeZone);
   const realizedPositions = getPerformanceHistory({ hours: 72, limit: 500 }).positions
     .filter((p) => p.closed_at && dateKeyInTimezone(new Date(p.closed_at), timeZone) === todayKey);
   return formatDailyPnlReport({
-    dateLabel: `${todayKey} WIB`,
+    title: compact ? "PnL Ringkas" : "PnL Hari Ini",
+    dateLabel: compact ? `${todayKey} WIB · detail: /pnltoday` : `${todayKey} WIB`,
     realizedPositions,
     openPositions: positions,
+    compact,
   });
 }
 
@@ -1328,8 +1360,8 @@ function formatHelpText() {
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions + paper simulator PnL",
-    "/pnl — PnL hari ini (realized + open)",
-    "/pnltoday — alias /pnl",
+    "/pnl — ringkasan PnL hari ini",
+    "/pnltoday — detail PnL hari ini",
     "/paper — list paper simulator PnL",
     "/paperclose <n> — close one paper simulator position",
     "/pool <n> — detailed info for one open position",
@@ -1343,6 +1375,7 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/lessons — list lessons learned",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1495,6 +1528,17 @@ async function telegramHandler(msg) {
     return;
   }
 
+  const lessonsMatch = text.match(/^\/lessons(?:\s+(\d+))?$/i);
+  if (lessonsMatch) {
+    try {
+      const limit = lessonsMatch[1] ? Math.max(5, Math.min(40, Number(lessonsMatch[1]))) : 20;
+      await sendHTML(generateLessonsReport({ limit }));
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   if (text === "/help") {
     await sendMessage(formatHelpText()).catch(() => {});
     return;
@@ -1534,7 +1578,15 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/pnl" || text === "/pnltoday") {
+  if (text === "/pnl") {
+    try {
+      const { positions } = await getMyPositions({ force: true });
+      await sendHTML(buildTodayPnlReport({ positions: positions || [], compact: true })).catch(() => {});
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/pnltoday") {
     try {
       const { positions } = await getMyPositions({ force: true });
       await sendHTML(buildTodayPnlReport({ positions: positions || [] })).catch(() => {});
@@ -1594,7 +1646,7 @@ async function telegramHandler(msg) {
       if (result.success) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
         const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "💵"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
@@ -1966,7 +2018,7 @@ Commands:
         console.log(`Positions: ${positions.total_positions}`);
         for (const p of positions.positions) {
           const status = p.in_range ? "in-range ✓" : "OUT OF RANGE ⚠";
-          console.log(`  ${p.pair.padEnd(16)} ${status}  fees: ${config.management.solMode ? "◎" : "$"}${p.unclaimed_fees_usd}`);
+          console.log(`  ${p.pair.padEnd(16)} ${status}  fees: ${config.management.solMode ? "◎" : "💵"}${p.unclaimed_fees_usd}`);
         }
         console.log();
       });
