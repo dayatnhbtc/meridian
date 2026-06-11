@@ -91,7 +91,10 @@ async function getJupiterPrices(mints) {
     if (!res.ok) throw new Error(`Jupiter ${res.status}`);
     const assets = await res.json();
     const out = {};
-    for (const a of assets) out[a.id] = maybeNum(a.usdPrice);
+    for (const a of assets) {
+      out[a.id] = maybeNum(a.usdPrice);
+      if (a.symbol || a.name) out[`${a.id}:symbol`] = a.symbol || a.name;
+    }
     return out;
   } catch (e) {
     log("pnl_price", `Jupiter price fetch failed: ${e.message}`);
@@ -147,6 +150,13 @@ async function getMeteoraData(conn, walletAddress, flat) {
 
 function mapEntries(map) {
   return map instanceof Map ? [...map.entries()] : Object.entries(map || {});
+}
+
+function resolvePairName(f, prices, meteora, tracked) {
+  if (tracked?.pool_name) return tracked.pool_name;
+  const tokenX = meteora?.tokenX || prices[`${f.baseMint}:symbol`] || null;
+  const tokenY = meteora?.tokenY || "SOL";
+  return tokenX ? `${tokenX}-${tokenY}` : "?/SOL";
 }
 
 // ─── Build the shaped position object (matches getMyPositions output) ──
@@ -213,7 +223,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   return {
     position:           f.position,
     pool:               f.pool,
-    pair:               tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL"),
+    pair:               resolvePairName(f, prices, meteora, tracked),
     base_mint:          f.baseMint,
     lower_bin:          f.lower ?? tracked?.bin_range?.min ?? null,
     upper_bin:          f.upper ?? tracked?.bin_range?.max ?? null,
