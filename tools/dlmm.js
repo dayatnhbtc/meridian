@@ -28,12 +28,12 @@ import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { getWalletBalances, normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
-import { openPaperPosition } from "../paper-positions.js";
+
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { assertLiveTradingAllowed } from "../safety.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { ensureCloseReasonLabel } from "../close-reasons.js";
-import { EVIL_PANDA_PRESET_ID, applyEvilPandaDeployDefaults } from "../evil-panda.js";
+import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -474,7 +474,7 @@ export async function deployPosition({
   amount_x,
   amount_y,
   strategy,
-  strategy_preset,
+
   bins_below,
   bins_above,
   downside_pct,
@@ -498,30 +498,6 @@ export async function deployPosition({
   entry_price_change_pct,
 }) {
   pool_address = normalizeMint(pool_address);
-
-  if (strategy_preset === EVIL_PANDA_PRESET_ID) {
-    if (process.env.DRY_RUN !== "true") {
-      throw new Error("evil_panda_safe_v1 is paper-only until verified; refusing live deploy.");
-    }
-    const defaults = applyEvilPandaDeployDefaults({
-      pool_address,
-      amount_sol,
-      amount_x,
-      amount_y,
-      strategy,
-      strategy_preset,
-      bins_below,
-      bins_above,
-      downside_pct,
-      upside_pct,
-      bin_step,
-    }, config.management);
-    amount_x = defaults.amount_x;
-    amount_y = defaults.amount_y;
-    strategy = defaults.strategy;
-    bins_above = defaults.bins_above;
-    downside_pct = defaults.downside_pct;
-  }
 
   const activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
@@ -625,6 +601,24 @@ export async function deployPosition({
     );
   }
 
+  if (process.env.DRY_RUN === "true") {
+    return {
+      dry_run: true,
+      would_deploy: {
+        pool_address,
+        strategy: activeStrategy,
+        bins_below: activeBinsBelow,
+        bins_above: activeBinsAbove,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        wide_range: totalBins > 69,
+      },
+      message: "DRY RUN — no transaction sent",
+    };
+  }
+
   const isWideRange = totalBins > 69;
   const minBinId = activeBin.binId - activeBinsBelow;
   const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
@@ -638,59 +632,13 @@ export async function deployPosition({
     );
   }
 
+  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+
   const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
   const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
   const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
   const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
   const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
-
-  if (process.env.DRY_RUN === "true") {
-    const wallet = await getWalletBalances().catch(() => null);
-    const solPrice = Number(wallet?.sol_price ?? 0);
-    const depositUsd = solPrice > 0 ? finalAmountY * solPrice : finalAmountY;
-    const paperPosition = await openPaperPosition({
-      pool_address,
-      deposit_amount: depositUsd,
-      lower_price: minPrice,
-      upper_price: maxPrice,
-      strategy_type: activeStrategy === "bid_ask" ? "bid-ask" : activeStrategy,
-      strategy_preset: strategy_preset ?? null,
-      entry_signal: strategy_preset === EVIL_PANDA_PRESET_ID ? "supertrend_break_above_15m" : null,
-      exit_signal: strategy_preset === EVIL_PANDA_PRESET_ID ? "rsi2_gt_90_and_bb_upper_or_macd_first_green" : null,
-    });
-    return {
-      success: true,
-      dry_run: true,
-      paper_simulated: true,
-      paper_position: paperPosition,
-      would_deploy: {
-        pool_address,
-        strategy: activeStrategy,
-        strategy_preset: strategy_preset ?? null,
-        bins_below: activeBinsBelow,
-        bins_above: activeBinsAbove,
-        downside_pct: downside_pct ?? null,
-        upside_pct: upside_pct ?? null,
-        amount_x: finalAmountX,
-        amount_y: finalAmountY,
-        deposit_usd: depositUsd,
-        wide_range: isWideRange,
-      },
-      position: paperPosition.id,
-      pool_name: paperPosition.pool,
-      bin_step: actualBinStep,
-      base_fee: base_fee ?? null,
-      price_range: { min: minPrice, max: maxPrice },
-      range_coverage: {
-        downside_pct: downsideCoveragePct,
-        upside_pct: upsideCoveragePct,
-        width_pct: totalWidthPct,
-      },
-      message: "DRY RUN — opened paper simulator position; no transaction sent",
-    };
-  }
-
-  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
 
   // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
   const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
@@ -1028,39 +976,13 @@ async function fetchLpAgentOpenPositions(walletAddress) {
   }
 }
 
-// ─── Fetch DLMM PnL API for all positions in a pool ────────────
-async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
-  const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=open&pageSize=100&page=1`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log("pnl_api", `HTTP ${res.status} for pool ${poolAddress.slice(0, 8)}: ${body.slice(0, 120)}`);
-      return {};
-    }
-    const data = await res.json();
-    const positions = data.positions || data.data || [];
-    if (positions.length === 0) {
-      log("pnl_api", `No positions returned for pool ${poolAddress.slice(0, 8)} — keys: ${Object.keys(data).join(", ")}`);
-    }
-    const byAddress = {};
-    for (const p of positions) {
-      const addr = p.positionAddress || p.address || p.position;
-      if (addr) byAddress[addr] = p;
-    }
-    return byAddress;
-  } catch (e) {
-    log("pnl_api", `Fetch error for pool ${poolAddress.slice(0, 8)}: ${e.message}`);
-    return {};
-  }
-}
-
 // ─── Get Position PnL (Meteora API) ─────────────────────────────
 export async function getPositionPnl({ pool_address, position_address }) {
   pool_address = normalizeMint(pool_address);
   position_address = normalizeMint(position_address);
   const walletAddress = getWallet().publicKey.toString();
-  if (shouldUseLpAgentRelay()) {
+  // Prefer the public-infra path (RPC + Jupiter + Meteora deposits) used by getMyPositions.
+  if (config.pnl.source === "rpc") {
     try {
       const payload = await getMyPositions({ force: true, silent: true });
       const p = payload?.positions?.find((position) => position.position === position_address);
@@ -1077,12 +999,10 @@ export async function getPositionPnl({ pool_address, position_address }) {
           upper_bin: p.upper_bin,
           active_bin: p.active_bin,
           age_minutes: p.age_minutes,
-          request_id: payload?.request_id || null,
         };
       }
-      log("pnl_warn", "Relay positions API did not include requested position; falling back to Meteora PnL path");
     } catch (error) {
-      log("pnl_warn", `Relay PnL lookup failed; falling back to Meteora PnL path: ${error.message}`);
+      log("pnl_warn", `RPC PnL lookup failed; falling back to direct Meteora PnL path: ${error.message}`);
     }
   }
   try {
@@ -1273,24 +1193,25 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   }
 
   const loadPositions = async () => { try {
-    let relayLpAgentByPosition = null;
-    let relayRequestId = null;
-    if (shouldUseLpAgentRelay()) {
+    // ── Primary path: public infra (on-chain RPC + Jupiter + Meteora deposits) ──
+    // No LPAgent / agentmeridian dependency, so the poller runs aggressively on
+    // fully public resources. Falls through to the Meteora-API path on any error.
+    if (config.pnl.source === "rpc") {
       try {
-        if (!silent) log("positions", "Fetching raw LPAgent open positions via Agent Meridian relay...");
-        const result = await fetchRawOpenPositionsFromMeridian({
-          walletAddress,
-          agentId: getAgentIdForRequests(),
-        });
-        relayLpAgentByPosition = result.byPosition || {};
-        relayRequestId = result.requestId || result.request_id || null;
+        if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
+        const rpcResult = await computePositions(walletAddress);
+        if (useLocalWallet) {
+          syncOpenPositions(rpcResult.positions.map((p) => p.position));
+          _positionsCache = rpcResult;
+          _positionsCacheAt = Date.now();
+        }
+        return rpcResult;
       } catch (error) {
-        log("positions_warn", `Agent Meridian raw relay failed; falling back to direct LPAgent fetch: ${error.message}`);
+        log("positions_warn", `RPC PnL path failed; falling back to Meteora portfolio API: ${error.message}`);
       }
     }
 
-    // Portfolio API discovers open pools/positions for this wallet.
-    // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
+    // ── Fallback path: Meteora portfolio + /pnl APIs (no LPAgent) ──
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
     const res = await fetch(portfolioUrl);
@@ -1305,7 +1226,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
-    const lpAgentByPosition = relayLpAgentByPosition || await fetchLpAgentOpenPositions(walletAddress);
+    const lpAgentByPosition = {}; // LPAgent removed — Meteora binData only
 
     const positions = [];
     for (const pool of pools) {
@@ -1442,7 +1363,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       wallet: walletAddress,
       total_positions: positions.length,
       positions,
-      request_id: relayRequestId,
+      source: "meteora",
     };
     if (useLocalWallet) {
       syncOpenPositions(positions.map(p => p.position));
