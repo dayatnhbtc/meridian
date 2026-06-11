@@ -7,7 +7,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, getPoolDetail } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -25,7 +25,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, adoptPosition } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -218,6 +218,32 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+
+    // ── Auto-adopt manual (untracked) positions ──────────────────
+    // Detect positions on-chain that are not in state.json, fetch pool
+    // detail, and save entry metadata so their lifecycle is fully tracked.
+    const adoptPromises = [];
+    for (const p of positions) {
+      if (!getTrackedPosition(p.position)) {
+        adoptPromises.push(
+          (async () => {
+            log("cron", `[ADOPT] Detected untracked position ${p.pair} (${p.position.slice(0, 8)}) — adopting`);
+            try {
+              const poolData = await getPoolDetail({ pool_address: p.pool, timeframe: "1h" }).catch(() => null);
+              adoptPosition(p, poolData);
+            } catch (e) {
+              log("cron_warn", `[ADOPT] Failed for ${p.position.slice(0, 8)}: ${e.message}`);
+            }
+          })()
+        );
+      }
+    }
+    if (adoptPromises.length > 0) {
+      await Promise.all(adoptPromises);
+      // Re-fetch positions (state changed) after adoption for line 230 snapshot
+      const refreshed = await getMyPositions({ force: true }).catch(() => null);
+      positions = refreshed?.positions || [];
+    }
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");

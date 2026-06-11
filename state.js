@@ -130,6 +130,90 @@ export function trackPosition({
 }
 
 /**
+ * Adopt an untracked (manual) position by enriching it with pool detail.
+ * Called when a position is detected on-chain but has no state entry.
+ */
+export function adoptPosition(pos, poolDetail) {
+  const state = load();
+  if (state.positions[pos.position]) return log("state", `Position ${pos.position.slice(0, 8)} already tracked — skipping adopt`);
+
+  const ageMinutes = pos.age_minutes ?? 0;
+  const deployedAt = ageMinutes > 0
+    ? new Date(Date.now() - ageMinutes * 60000).toISOString()
+    : new Date().toISOString();
+
+  const poolInfo = poolDetail || {};
+  const tokenX = poolInfo.token_x || {};
+  const dlmm = poolInfo.dlmm_params || {};
+
+  state.positions[pos.position] = {
+    position: pos.position,
+    pool: pos.pool,
+    pool_name: pos.pair,
+    strategy: "bid_ask",
+    source: "manual_adopted",
+    adopted_at: new Date().toISOString(),
+    bin_range: {
+      min: pos.lower_bin ?? null,
+      max: pos.upper_bin ?? null,
+      bins_below: null,
+      bins_above: 0,
+      active: pos.active_bin ?? null,
+    },
+    amount_sol: pos.total_value_usd ?? 0,
+    amount_x: 0,
+    active_bin_at_deploy: pos.active_bin ?? null,
+    bin_step: dlmm.bin_step ?? null,
+    volatility: poolInfo.volatility ?? null,
+    fee_tvl_ratio: poolInfo.fee_tvl_ratio ?? null,
+    initial_fee_tvl_24h: poolInfo.fee_tvl_ratio ?? null,
+    organic_score: tokenX.organic_score ?? null,
+    initial_value_usd: pos.total_value_usd ?? 0,
+    entry_mcap: tokenX.market_cap ?? null,
+    entry_tvl: poolInfo.tvl ?? null,
+    entry_volume: poolInfo.volume ?? null,
+    entry_holders: tokenX.holders ?? null,
+    entry_volume_change_pct: poolInfo.volume_change_pct ?? null,
+    entry_fee_change_pct: poolInfo.fee_change_pct ?? null,
+    entry_net_deposits: poolInfo.net_deposits ?? null,
+    entry_price_change_pct: poolInfo.pool_price_change_pct ?? null,
+    signal_snapshot: poolInfo.volume != null ? {
+      base_mint: pos.base_mint ?? null,
+      organic_score: tokenX.organic_score ?? null,
+      fee_tvl_ratio: poolInfo.fee_tvl_ratio ?? null,
+      volume: Math.round(poolInfo.volume ?? 0),
+      mcap: tokenX.market_cap ?? 0,
+      holder_count: tokenX.holders ?? 0,
+      smart_wallets_present: false,
+      narrative_quality: null,
+      volatility: poolInfo.volatility ?? null,
+    } : null,
+    deployed_at: deployedAt,
+    out_of_range_since: pos.in_range === false ? new Date().toISOString() : null,
+    total_minutes_out_of_range: 0,
+    last_claim_at: null,
+    total_fees_claimed_usd: 0,
+    rebalance_count: 0,
+    closed: false,
+    closed_at: null,
+    notes: [`Manual position adopted at ${new Date().toISOString()} — deployed outside Meridian`],
+    peak_pnl_pct: 0,
+    pending_peak_pnl_pct: null,
+    pending_peak_started_at: null,
+    pending_trailing_current_pnl_pct: null,
+    pending_trailing_peak_pnl_pct: null,
+    pending_trailing_drop_pct: null,
+    pending_trailing_started_at: null,
+    confirmed_trailing_exit_reason: null,
+    confirmed_trailing_exit_until: null,
+    trailing_active: false,
+  };
+  pushEvent(state, { action: "manual_adopt", position: pos.position, pool_name: pos.pair });
+  save(state);
+  log("state", `[ADOPT] Manual position ${pos.pair} (${pos.position.slice(0, 8)}) adopted into tracking`);
+}
+
+/**
  * Mark a position as out of range (sets timestamp on first detection).
  */
 export function markOutOfRange(position_address) {
