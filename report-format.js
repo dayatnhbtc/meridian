@@ -164,7 +164,8 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
   return [
     options.intro ? escapeHtml(options.intro) : null,
     `<b>${escapeHtml(title)}</b>`,
-    `Positions: ${slots}  Range: ${inRangeCount}/${positions.length} IN${avgRangePosition == null ? "" : ` (avg ${avgRangePosition}%)`}  Actions: ${actionBits}`,
+    `Positions: ${slots}  Range: ${inRangeCount}/${positions.length} IN${avgRangePosition == null ? "" : ` (avg ${avgRangePosition}%)`}`,
+    `Actions: ${actionBits}`,
     `Value: ${money(totalValue, valueOpts)}  PnL: ${signedMoney(totalPnl)}  Fees: ${money(totalFees, valueOpts)}`,
     "",
     body,
