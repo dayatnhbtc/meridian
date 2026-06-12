@@ -27,8 +27,9 @@ import {
 } from "./telegram.js";
 import { generateBriefing, generateLessonsReport } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, adoptPosition } from "./state.js";
-import { getActiveStrategy } from "./strategy-library.js";
+import { getActiveStrategy, getTakeProfitPctForLpStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { formatCloseReason } from "./close-reasons.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -900,17 +901,21 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: formatCloseReason("SL", `PnL ${Number(position.pnl_pct).toFixed(2)}% <= stopLossPct ${managementConfig.stopLossPct}%`) };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+  const strategyName = position.strategy || tracked?.strategy;
+  const strategyTakeProfitPct = getTakeProfitPctForLpStrategy(strategyName);
+  const takeProfitPct = strategyTakeProfitPct ?? managementConfig.takeProfitPct;
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= takeProfitPct) {
+    const strategyLabel = strategyName ? ` (${strategyName})` : "";
+    return { action: "CLOSE", rule: 2, reason: formatCloseReason("TP", `PnL ${Number(position.pnl_pct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`) };
   }
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 3, reason: formatCloseReason("OOR", `active bin ${position.active_bin} above upper range ${position.upper_bin}`) };
   }
   if (
     position.active_bin != null &&
@@ -918,14 +923,14 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin > position.upper_bin &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    return { action: "CLOSE", rule: 4, reason: formatCloseReason("OOR", `out of range ${position.minutes_out_of_range ?? 0}m (limit: ${managementConfig.outOfRangeWaitMinutes}m)`) };
   }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    return { action: "CLOSE", rule: 5, reason: formatCloseReason("Low Yield", `fee/TVL ${Number(position.fee_per_tvl_24h).toFixed(2)}% < min ${managementConfig.minFeePerTvl24h}% (age: ${position.age_minutes ?? "?"}m)`) };
   }
   return null;
 }
