@@ -403,7 +403,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
     return null;
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
-  _screeningLastTriggered = Date.now();
 
   // Hard guards — don't even run the agent if preconditions aren't met
   let prePositions, preBalance;
@@ -443,6 +442,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     _screeningBusy = false;
     return screenReport;
   }
+  _screeningLastTriggered = Date.now();
   if (!silent && telegramEnabled()) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
   }
