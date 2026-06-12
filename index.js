@@ -309,22 +309,68 @@ export async function runManagementCycle({ silent = false } = {}) {
       actionMap.set(p.position, { action: "STAY" });
     }
 
-    // ── Build JS report ──────────────────────────────────────────────
+    // ── Build JS report (rich detailed format) ──────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
+    const cur = config.management.solMode ? "◎" : "$";
+
+    // Total portfolio USD PnL
+    const totalPnlUsd = positionData.reduce((s, p) => {
+      return s + (p.pnl_true_usd ?? 0);
+    }, 0);
+    const totalPnlStr = totalPnlUsd >= 0 ? `+$${totalPnlUsd.toFixed(2)}` : `-$${Math.abs(totalPnlUsd).toFixed(2)}`;
+
+    // Average in-range percentage from bin positions
+    const avgInRange = positionData.length > 0
+      ? Math.round(positionData.reduce((s, p) => {
+          const binWidth = (p.upper_bin - p.lower_bin) || 1;
+          const binPct = Math.min(100, Math.max(0, ((p.active_bin ?? p.lower_bin) - p.lower_bin) / binWidth * 100));
+          return s + binPct;
+        }, 0) / positionData.length)
+      : 0;
+    const inRangeCount = positionData.filter(p => p.in_range).length;
+
+    // Build per-position detailed lines
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      return line;
+      const inRange = p.in_range ? "🟢" : "🔴";
+      const actionIcon = act.action === "STAY" ? "✅" : act.action === "CLOSE" ? "🔒" : act.action === "CLAIM" ? "💸" : "⚡";
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD" : act.action;
+
+      // In-range % from bin position
+      const binWidth = (p.upper_bin - p.lower_bin) || 1;
+      const inRangePct = Math.min(100, Math.max(0, Math.round(((p.active_bin ?? p.lower_bin ?? 0) - (p.lower_bin ?? 0)) / binWidth * 100)));
+
+      // USD PnL per position
+      const posPnlUsd = p.pnl_true_usd ?? (p.pnl_pct != null ? (p.total_value_usd ?? 0) * p.pnl_pct / 100 : 0);
+      const posPnlStr = posPnlUsd >= 0 ? `+$${posPnlUsd.toFixed(2)}` : `-$${Math.abs(posPnlUsd).toFixed(2)}`;
+
+      // Age format
+      const ageMins = p.age_minutes ?? 0;
+      const ageStr = ageMins >= 60 ? `${Math.floor(ageMins / 60)}h ${ageMins % 60}m` : `${ageMins}m`;
+
+      // Bin bar: [───●────────────]
+      const barWidth = 24;
+      const markerPos = Math.round(Math.min(barWidth, Math.max(0, inRangePct / 100 * barWidth)));
+      const bar = '─'.repeat(Math.max(0, markerPos)) + '●' + '─'.repeat(Math.max(0, barWidth - markerPos));
+
+      // Bin values line — simple spaced format
+      const binLine = `${String(p.lower_bin ?? "?").padEnd(6)}  ${String(p.active_bin ?? "?").padStart(4).padEnd(8)}  ${String(p.upper_bin ?? "?")}`;
+
+      const lines = [
+        `${p.pair}  ${inRange} IN ${inRangePct}%  ${actionIcon} ${statusLabel}`,
+        `Val: ${cur}${(p.total_value_usd ?? 0).toFixed(4)}  PnL: ${posPnlStr} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(2)}%)`,
+        `Fees: ${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(4)}  Yield: ${p.fee_per_tvl_24h ?? "?"}%  Age: ${ageStr}`,
+        `[${bar}]`,
+        binLine,
+      ];
+
+      if (p.instruction) lines.push(`Note: "${p.instruction}"`);
+      if (act.action === "CLOSE" && act.rule === "exit") lines.push(`⚡ Trailing TP: ${act.reason}`);
+      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") lines.push(`Rule ${act.rule}: ${act.reason}`);
+
+      return lines.join("\n");
     });
 
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
@@ -332,9 +378,12 @@ export async function runManagementCycle({ silent = false } = {}) {
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
-    const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    const allStay = needsAction.length === 0;
+    mgmtReport = `Portfolio 💼\n` +
+      `Positions: ${positions.length}/${config.risk.maxPositions}  Range: ${inRangeCount}/${positions.length} IN (avg ${avgInRange}%)  Actions: ${allStay ? "✅ all stay" : "⚠️ action needed"}\n` +
+      `Value: ${cur}${totalValue.toFixed(4)}  PnL: ${totalPnlStr}  Fees: ${cur}${totalUnclaimed.toFixed(4)}\n\n` +
+      reportLines.join("\n\n") +
+      `\n\n${actionSummary}`;
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
