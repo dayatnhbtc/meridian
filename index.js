@@ -8,7 +8,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, getPoolDetail } from "./tools/screening.js";
-import { formatPortfolioReport } from "./report-format.js";
+import { formatPortfolioReport, formatDailyPnlReport } from "./report-format.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -25,7 +25,7 @@ import {
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
-import { generateBriefing } from "./briefing.js";
+import { generateBriefing, generateLessonsReport } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, adoptPosition } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -1260,6 +1260,8 @@ function formatHelpText() {
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions",
+    "/pnl — today PnL summary",
+    "/pnltoday — today PnL detail",
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",
     "/closeall — close all open positions",
@@ -1271,6 +1273,9 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/lessons — list lessons learned",
+    "/learning — alias for /lessons",
+    "/learn [pool] — study top LPers and save lessons",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1376,7 +1381,8 @@ async function drainTelegramQueue() {
 }
 
 async function telegramHandler(msg) {
-  const text = msg?.text?.trim();
+  const rawText = msg?.text?.trim();
+  const text = rawText?.replace(/^\/([A-Za-z0-9_]+)@[A-Za-z0-9_]+(\s|$)/, "/$1$2").trim();
   if (!text) return;
   if (msg?.isCallback && text.startsWith("cfg:")) {
     try {
@@ -1404,6 +1410,67 @@ async function telegramHandler(msg) {
     try {
       const briefing = await generateBriefing();
       await sendHTML(briefing);
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  const lessonsMatch = text.match(/^\/(?:lessons|learning)(?:\s+(\d+))?$/i);
+  if (lessonsMatch) {
+    try {
+      const limit = lessonsMatch[1] ? Math.max(5, Math.min(40, Number(lessonsMatch[1]))) : 20;
+      await sendHTML(generateLessonsReport({ limit }));
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/pnl") {
+    try {
+      const { positions } = await getMyPositions({ force: true });
+      await sendHTML(formatDailyPnlReport({ openPositions: positions || [], compact: true })).catch(() => {});
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/pnltoday") {
+    try {
+      const { positions } = await getMyPositions({ force: true });
+      await sendHTML(formatDailyPnlReport({ openPositions: positions || [] })).catch(() => {});
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  const learnMatch = text.match(/^\/learn(?:\s+(.+))?$/i);
+  if (learnMatch) {
+    try {
+      const poolArg = learnMatch[1]?.trim() || null;
+      let poolsToStudy = [];
+      if (poolArg) {
+        poolsToStudy = [{ pool: poolArg, name: poolArg }];
+      } else {
+        await sendMessage("Studying top LPers: fetching top pool candidates...").catch(() => {});
+        const { candidates } = await getTopCandidates({ limit: 10 });
+        if (!candidates?.length) {
+          await sendMessage("No eligible pools found to study.").catch(() => {});
+          return;
+        }
+        poolsToStudy = candidates.map((c) => ({ pool: c.pool, name: c.name }));
+      }
+
+      const poolList = poolsToStudy
+        .map((p, i) => `${i + 1}. ${p.name} (${p.pool})`)
+        .join("\n");
+      await sendMessage(`Studying top LPers across ${poolsToStudy.length} pool(s)...`).catch(() => {});
+      const { content: reply } = await agentLoop(
+        `Study top LPers across these ${poolsToStudy.length} pools by calling study_top_lpers for each:\n\n${poolList}\n\nFor each pool, call study_top_lpers then move to the next. After studying all pools:\n1. Identify patterns that appear across multiple pools (hold time, scalping vs holding, win rates).\n2. Note pool-specific patterns where behaviour differs significantly.\n3. Derive 4-8 concrete, actionable lessons using add_lesson. Prioritize cross-pool patterns — they're more reliable.\n4. Summarize what you learned.\n\nFocus on: hold duration, entry/exit timing, what win rates look like, whether scalpers or holders dominate.`,
+        config.llm.maxSteps,
+        [],
+        "GENERAL"
+      );
+      await sendHTML(reply).catch(() => sendMessage(stripThink(reply)).catch(() => {}));
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
