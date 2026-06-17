@@ -258,7 +258,8 @@ export const config = {
     rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     rsiTakeProfitOverbought: indicatorUserConfig.rsiTakeProfitOverbought ?? 90,
-    // healthy_breakout anti-blow-off guards:
+    // healthy_breakout guards:
+    rsiEntryFloor: indicatorUserConfig.rsiEntryFloor ?? 50, // RSI below = not a real uptrend, skip
     rsiBlowoff: indicatorUserConfig.rsiBlowoff ?? 88,      // RSI at/above = climactic, skip
     bbStretchPct: indicatorUserConfig.bbStretchPct ?? 3,   // close >X% above BB upper = parabolic, skip
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,

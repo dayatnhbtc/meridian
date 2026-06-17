@@ -257,6 +257,7 @@ export function evaluatePreset(side, preset, payload) {
       // confirmed uptrend with momentum, but NOT a climactic blow-off — so the
       // expected pullback fills the position and then recovers, rather than
       // reversing into a dump (which would strand the fill out-of-range below).
+      const rsiFloor = Number(config.indicators.rsiEntryFloor ?? 50);
       const blowoffRsi = Number(config.indicators.rsiBlowoff ?? config.indicators.rsiTakeProfitOverbought ?? 88);
       const bbStretchPct = Number(config.indicators.bbStretchPct ?? 3);
 
@@ -268,23 +269,27 @@ export function evaluatePreset(side, preset, payload) {
       const momentumUp = summary.macdSignalAvailable
         ? (summary.macdHistogram != null && summary.macdHistogram > 0)
         : true;
-      // Not exhausted (RSI): below the climax/blow-off zone.
-      const notRsiBlowoff = rsi == null || rsi < blowoffRsi;
+      // Real uptrend, not exhausted (RSI): in the healthy band [floor, blow-off).
+      const rsiHealthy = rsi != null && rsi >= rsiFloor && rsi < blowoffRsi;
+      // Elevated posture (Bollinger): price in the upper half of the band — so there
+      // is room for the expected pullback to fill the SOL bins below. Non-blocking if BB missing.
+      const priceElevated = summary.middleBand == null || close == null ? true : close >= summary.middleBand;
       // Not parabolic (Bollinger): price not stretched far above the upper band.
       const notBbBlowoff =
         upperBand == null || close == null || close <= upperBand * (1 + bbStretchPct / 100);
 
       if (side === "entry") {
-        const confirmed = bullishTrend && momentumUp && notRsiBlowoff && notBbBlowoff;
+        const confirmed = bullishTrend && momentumUp && rsiHealthy && priceElevated && notBbBlowoff;
         const blockers = [];
         if (!bullishTrend) blockers.push("Supertrend not bullish");
         if (!momentumUp) blockers.push("MACD histogram <= 0");
-        if (!notRsiBlowoff) blockers.push(`RSI ${rsi ?? "n/a"} >= blow-off ${blowoffRsi}`);
+        if (!rsiHealthy) blockers.push(`RSI ${rsi ?? "n/a"} outside healthy band [${rsiFloor}, ${blowoffRsi})`);
+        if (!priceElevated) blockers.push("price below BB mid (not elevated)");
         if (!notBbBlowoff) blockers.push(`price > ${bbStretchPct}% above BB upper`);
         return {
           confirmed,
           reason: confirmed
-            ? `Healthy breakout: bullish Supertrend${summary.macdSignalAvailable ? " + MACD up" : ""}, RSI ${rsi ?? "n/a"} (not overextended)`
+            ? `Healthy breakout: bullish Supertrend${summary.macdSignalAvailable ? " + MACD up" : ""}, RSI ${rsi ?? "n/a"} in [${rsiFloor},${blowoffRsi}), price elevated`
             : `Not a healthy breakout: ${blockers.join("; ")}`,
           signal: summary,
         };
