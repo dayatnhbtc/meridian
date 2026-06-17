@@ -989,6 +989,8 @@ export function pushFilteredReason(list, pool, reason) {
     base_mint: pool.base?.mint ?? pool.base_mint ?? null,
     fee_tvl_ratio: pool.fee_active_tvl_ratio ?? null,
     volume: pool.volume_window ?? pool.volume ?? null,
+    volume_change_pct: pool.volume_change_pct ?? pool.entry_volume_change_pct ?? null,
+    fee_change_pct: pool.fee_change_pct ?? pool.entry_fee_change_pct ?? null,
     mcap: pool.mcap ?? null,
     volatility: pool.volatility ?? null,
     organic_score: pool.organic_score ?? null,

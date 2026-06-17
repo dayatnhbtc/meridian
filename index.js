@@ -543,6 +543,8 @@ function logScreeningCycleSnapshot({ passing = [], rejected = [], totalScreened 
       outcome: "passed",
       fee_tvl_ratio: pool.fee_active_tvl_ratio ?? null,
       volume: pool.volume_window ?? pool.volume ?? null,
+      volume_change_pct: pool.volume_change_pct ?? pool.entry_volume_change_pct ?? null,
+      fee_change_pct: pool.fee_change_pct ?? pool.entry_fee_change_pct ?? null,
       mcap: pool.mcap ?? null,
       volatility: pool.volatility ?? null,
       organic_score: pool.organic_score ?? null,
@@ -557,6 +559,8 @@ function logScreeningCycleSnapshot({ passing = [], rejected = [], totalScreened 
       reason: item.reason ?? null,
       fee_tvl_ratio: item.fee_tvl_ratio ?? null,
       volume: item.volume ?? null,
+      volume_change_pct: item.volume_change_pct ?? null,
+      fee_change_pct: item.fee_change_pct ?? null,
       mcap: item.mcap ?? null,
       volatility: item.volatility ?? null,
       organic_score: item.organic_score ?? null,
@@ -814,7 +818,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
       // (NOT gated on Darwin) so entry quality stays measurable for later analysis.
       // Everything here rides into signal_snapshot → state.json → performance[].
       const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
-      const numOrNull = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      // Coerce numeric strings too — token.js formats some audit/stats fields with
+      // .toFixed(2) (e.g. top10/bots/price_change), which would otherwise be dropped as null.
+      const numOrNull = (v) => {
+        const n = typeof v === "string" ? parseFloat(v) : v;
+        return typeof n === "number" && Number.isFinite(n) ? n : null;
+      };
       // Compact indicator snapshot (RSI/MACD/BB/Supertrend) from the entry confirmation.
       const indicatorSnapshot = compactIndicatorSnapshot(pool.indicator_confirmation);
       stageSignals(pool.pool, {
@@ -828,6 +837,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
         narrative_quality:     n?.narrative ? "present" : "absent",
         volatility:            pool.volatility            ?? null,
         // ── entry audit metrics (newly captured for analysis) ──
+        volume_change_pct:     pool.volume_change_pct ?? pool.entry_volume_change_pct ?? null,
+        fee_change_pct:        pool.fee_change_pct ?? pool.entry_fee_change_pct ?? null,
         bin_step:              pool.bin_step              ?? null,
         fee_pct:               pool.fee_pct               ?? null,
         top10_pct:             numOrNull(top10Pct),
