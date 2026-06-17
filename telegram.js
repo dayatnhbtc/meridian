@@ -371,9 +371,12 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
   };
 
   function render() {
-    const sections = [state.title];
-    if (state.intro) sections.push(state.intro);
-    if (state.toolLines.length > 0) sections.push(state.toolLines.join("\n"));
+    // In HTML mode the plain-text parts (title/intro/tool progress) must be escaped;
+    // the footer is caller-provided pre-formatted HTML, so it is passed through as-is.
+    const esc = (s) => (useHTML ? escapeHtml(String(s)) : s);
+    const sections = [esc(state.title)];
+    if (state.intro) sections.push(esc(state.intro));
+    if (state.toolLines.length > 0) sections.push(esc(state.toolLines.join("\n")));
     if (state.footer) sections.push(state.footer);
     return sections.join("\n\n").slice(0, RICH_MSG_LIMIT);
   }
@@ -454,7 +457,7 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
         state.flushTimer = null;
       }
       if (state.flushPromise) await state.flushPromise;
-      state.footer = `❌ ${errorText}`;
+      state.footer = `❌ ${useHTML ? escapeHtml(String(errorText)) : errorText}`;
       await flushNow();
       finishLiveMessage(handle);
     },
