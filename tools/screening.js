@@ -866,6 +866,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     candidates: eligible,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
+    rejected: filteredOut,
   };
 }
 
@@ -979,10 +980,19 @@ function fix(n, decimals) {
   return Number.isFinite(value) ? Number(value.toFixed(decimals)) : null;
 }
 
-function pushFilteredReason(list, pool, reason) {
+export function pushFilteredReason(list, pool, reason) {
   if (!list || !pool) return;
   list.push({
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
+    pool: pool.pool ?? pool.pool_address ?? null,
+    base_mint: pool.base?.mint ?? pool.base_mint ?? null,
+    fee_tvl_ratio: pool.fee_active_tvl_ratio ?? null,
+    volume: pool.volume_window ?? pool.volume ?? null,
+    mcap: pool.mcap ?? null,
+    volatility: pool.volatility ?? null,
+    organic_score: pool.organic_score ?? null,
+    bin_step: pool.bin_step ?? null,
+    indicator: pool.indicator_confirmation ?? null,
   });
 }

@@ -74,3 +74,21 @@ export function logAction(action) {
   const actionsFile = path.join(LOG_DIR, `actions-${dateStr}.jsonl`);
   fs.appendFileSync(actionsFile, JSON.stringify(entry) + "\n");
 }
+
+/**
+ * Log a full screening snapshot (deployed/passed/rejected candidates) for later analysis.
+ */
+export function logScreeningSnapshot(record) {
+  const timestamp = new Date().toISOString();
+
+  const entry = { timestamp, ...record };
+
+  // Console: single concise line
+  const rejected = (record.candidates || []).filter((c) => c.outcome === "rejected").length;
+  console.log(`[screening] ${record.candidates?.length ?? 0} candidates logged (${rejected} rejected)`);
+
+  // File: full JSON for analysis trail (daily rotation)
+  const dateStr = timestamp.split("T")[0];
+  const screeningFile = path.join(LOG_DIR, `screening-${dateStr}.jsonl`);
+  fs.appendFileSync(screeningFile, JSON.stringify(entry) + "\n");
+}

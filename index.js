@@ -4,10 +4,10 @@ import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
-import { log } from "./logger.js";
+import { log, logScreeningSnapshot } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates, getPoolDetail } from "./tools/screening.js";
+import { getTopCandidates, getPoolDetail, pushFilteredReason } from "./tools/screening.js";
 import { formatPortfolioReport, formatDailyPnlReport } from "./report-format.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
@@ -30,7 +30,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing, generateLessonsReport } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, queueTakeProfitConfirmation, resolvePendingTakeProfit, consumeConfirmedTakeProfit, adoptPosition, queueReentry, drainReentryQueue, peekReentryQueue } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, queueTakeProfitConfirmation, resolvePendingTakeProfit, consumeConfirmedTakeProfit, adoptPosition, queueReentry, drainReentryQueue, peekReentryQueue, getStateSummary } from "./state.js";
 import { getActiveStrategy, getTakeProfitPctForLpStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { formatCloseReason } from "./close-reasons.js";
@@ -510,6 +510,69 @@ After executing, write a brief one-line result per position.
   return mgmtReport;
 }
 
+// Compact indicator snapshot (RSI/MACD/BB/Supertrend) from an entry confirmation object.
+// Shared by the candidate-block builder (deployed/passing) and the rejected-candidate logger.
+function compactIndicatorSnapshot(confirmation) {
+  const c = confirmation;
+  if (!c || c.enabled === false) return null;
+  const sig = (c.intervals || []).find((iv) => iv?.ok && iv?.signal)?.signal || null;
+  return {
+    preset:              c.preset ?? config.indicators.entryPreset ?? null,
+    confirmed:           c.confirmed ?? null,
+    skipped:             c.skipped ?? false,
+    reason:              c.reason ?? null,
+    rsi:                 sig?.rsi ?? null,
+    macd_hist:           sig?.macdHistogram ?? null,
+    supertrend_dir:      sig?.supertrendDirection ?? null,
+    supertrend_break_up: sig?.supertrendBreakUp ?? null,
+    close:               sig?.close ?? null,
+    bb_upper:            sig?.upperBand ?? null,
+    bb_mid:              sig?.middleBand ?? null,
+    bb_lower:            sig?.lowerBand ?? null,
+  };
+}
+
+// Logs every screened candidate (passed + all rejects) to a daily JSONL for later
+// entry analysis. Pure observability — wrapped so a logging failure never crashes screening.
+function logScreeningCycleSnapshot({ passing = [], rejected = [], totalScreened = null }) {
+  try {
+    const passedEntries = passing.map(({ pool }) => ({
+      pool: pool.pool ?? pool.pool_address ?? null,
+      name: pool.name ?? null,
+      base_mint: pool.base?.mint ?? pool.base_mint ?? null,
+      outcome: "passed",
+      fee_tvl_ratio: pool.fee_active_tvl_ratio ?? null,
+      volume: pool.volume_window ?? pool.volume ?? null,
+      mcap: pool.mcap ?? null,
+      volatility: pool.volatility ?? null,
+      organic_score: pool.organic_score ?? null,
+      bin_step: pool.bin_step ?? null,
+      indicator: compactIndicatorSnapshot(pool.indicator_confirmation),
+    }));
+    const rejectedEntries = rejected.map((item) => ({
+      pool: item.pool ?? null,
+      name: item.name ?? null,
+      base_mint: item.base_mint ?? null,
+      outcome: "rejected",
+      reason: item.reason ?? null,
+      fee_tvl_ratio: item.fee_tvl_ratio ?? null,
+      volume: item.volume ?? null,
+      mcap: item.mcap ?? null,
+      volatility: item.volatility ?? null,
+      organic_score: item.organic_score ?? null,
+      bin_step: item.bin_step ?? null,
+      indicator: compactIndicatorSnapshot(item.indicator),
+    }));
+    logScreeningSnapshot({
+      cycle_ts: new Date().toISOString(),
+      total_screened: totalScreened ?? (passing.length + rejected.length),
+      candidates: [...passedEntries, ...rejectedEntries],
+    });
+  } catch (logErr) {
+    log("cron_warn", `Screening snapshot log failed: ${logErr.message}`);
+  }
+}
+
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
@@ -577,6 +640,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
+    const rejectedCandidates = topCandidates?.rejected || [];
 
     // ── Inject reentry candidates ──────────────────────────────────
     const reentryQueue = drainReentryQueue();
@@ -641,22 +705,30 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
-        filteredOut.push({ name: pool.name, reason: `launchpad ${launchpad} not in allow-list` });
+        pushFilteredReason(filteredOut, pool, `launchpad ${launchpad} not in allow-list`);
         return false;
       }
       if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
-        filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
+        pushFilteredReason(filteredOut, pool, `blocked launchpad (${launchpad})`);
         return false;
       }
       const botPct = ti?.audit?.bot_holders_pct;
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
       if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+        pushFilteredReason(filteredOut, pool, `bot holders ${botPct}% > ${maxBotHoldersPct}%`);
         return false;
       }
       return true;
+    });
+
+    // Capture every screened candidate (passed + all rejects, pre- and post-recon) to a
+    // daily JSONL — fires on every cycle, including no-deploy / lone-skip outcomes.
+    logScreeningCycleSnapshot({
+      passing,
+      rejected: [...rejectedCandidates, ...filteredOut],
+      totalScreened: topCandidates?.total_screened ?? candidates.length,
     });
 
     if (passing.length === 0) {
@@ -744,25 +816,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
       const numOrNull = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
       // Compact indicator snapshot (RSI/MACD/BB/Supertrend) from the entry confirmation.
-      const indicatorSnapshot = (() => {
-        const c = pool.indicator_confirmation;
-        if (!c || c.enabled === false) return null;
-        const sig = (c.intervals || []).find((iv) => iv?.ok && iv?.signal)?.signal || null;
-        return {
-          preset:              c.preset ?? config.indicators.entryPreset ?? null,
-          confirmed:           c.confirmed ?? null,
-          skipped:             c.skipped ?? false,
-          reason:              c.reason ?? null,
-          rsi:                 sig?.rsi ?? null,
-          macd_hist:           sig?.macdHistogram ?? null,
-          supertrend_dir:      sig?.supertrendDirection ?? null,
-          supertrend_break_up: sig?.supertrendBreakUp ?? null,
-          close:               sig?.close ?? null,
-          bb_upper:            sig?.upperBand ?? null,
-          bb_mid:              sig?.middleBand ?? null,
-          bb_lower:            sig?.lowerBand ?? null,
-        };
-      })();
+      const indicatorSnapshot = compactIndicatorSnapshot(pool.indicator_confirmation);
       stageSignals(pool.pool, {
         base_mint:             baseMint,
         organic_score:         pool.organic_score         ?? null,
