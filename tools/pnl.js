@@ -82,23 +82,47 @@ export async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
   }
 }
 
-// ─── Jupiter prices (never cached) ──────────────────────────────
+// ─── Jupiter prices (per-mint TTL cache) ────────────────────────
+// The PnL poller runs every few seconds; without caching it batches a Jupiter
+// datapi call on every tick (~20/min) which, combined with screening bursts,
+// trips the shared 429 rate limit. An 8s per-mint cache serves consecutive
+// poller ticks from memory while staying well inside the TP/trailing 15s
+// recheck window. Caching is per-mint (not per-query) so it survives the
+// position set changing as positions open/close.
+const _jupPriceCache = new Map(); // mint -> { price, symbol, at }
+const JUP_PRICE_TTL_MS = 8000;
+
 async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
   if (!list.length) return {};
+  const now = Date.now();
+  const out = {};
+  const stale = [];
+  for (const mint of list) {
+    const cached = _jupPriceCache.get(mint);
+    if (cached && now - cached.at < JUP_PRICE_TTL_MS) {
+      out[mint] = cached.price;
+      if (cached.symbol) out[`${mint}:symbol`] = cached.symbol;
+    } else {
+      stale.push(mint);
+    }
+  }
+  if (!stale.length) return out;
   try {
-    const res = await fetch(`${JUP_SEARCH}?query=${list.join(",")}`, { headers: { accept: "application/json" } });
+    const res = await fetch(`${JUP_SEARCH}?query=${stale.join(",")}`, { headers: { accept: "application/json" } });
     if (!res.ok) throw new Error(`Jupiter ${res.status}`);
     const assets = await res.json();
-    const out = {};
     for (const a of assets) {
-      out[a.id] = maybeNum(a.usdPrice);
-      if (a.symbol || a.name) out[`${a.id}:symbol`] = a.symbol || a.name;
+      const price = maybeNum(a.usdPrice);
+      const symbol = a.symbol || a.name || null;
+      out[a.id] = price;
+      if (symbol) out[`${a.id}:symbol`] = symbol;
+      _jupPriceCache.set(a.id, { price, symbol, at: now });
     }
     return out;
   } catch (e) {
     log("pnl_price", `Jupiter price fetch failed: ${e.message}`);
-    return {};
+    return out; // serve whatever cached prices we resolved above
   }
 }
 

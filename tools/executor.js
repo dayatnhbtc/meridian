@@ -640,6 +640,7 @@ export async function executeTool(name, args) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
       return {
         blocked: true,
+        retryable: safetyCheck.retryable || false,
         reason: safetyCheck.reason,
       };
     }
@@ -858,6 +859,14 @@ async function runSafetyChecks(name, args) {
       // Check SOL balance
       if (process.env.DRY_RUN !== "true") {
         const balance = await getWalletBalances();
+        // If balance fetch itself failed (network error), don't hard-block
+        if (balance.error && balance.sol === 0) {
+          return {
+            pass: false,
+            reason: `Could not verify wallet balance (Helius fetch failed: ${balance.error}). This is a transient network error — retry deploy_position.`,
+            retryable: true,
+          };
+        }
         const gasReserve = config.management.gasReserve;
         const minRequired = amountY + gasReserve;
         if (balance.sol < minRequired) {

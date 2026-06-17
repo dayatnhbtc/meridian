@@ -102,6 +102,34 @@ const client = new OpenAI({
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
+// ─── Fallback provider (OpenRouter) ──────────────────────────────
+// When the primary provider rejects with a balance/credit/auth error
+// (e.g. DeepSeek "402 Insufficient Balance"), transparently fail over to
+// OpenRouter so position management never stalls on a dead provider.
+const FALLBACK_BASE_URL = process.env.LLM_FALLBACK_BASE_URL || "https://openrouter.ai/api/v1";
+const FALLBACK_API_KEY = process.env.LLM_FALLBACK_API_KEY || process.env.OPENROUTER_API_KEY || null;
+const FALLBACK_PROVIDER_MODEL = process.env.LLM_FALLBACK_MODEL || "openrouter/healer-alpha";
+const fallbackClient = FALLBACK_API_KEY
+  ? new OpenAI({ baseURL: FALLBACK_BASE_URL, apiKey: FALLBACK_API_KEY, timeout: 5 * 60 * 1000 })
+  : null;
+// Once the primary provider returns a balance/credit error, skip it for this
+// long so every cycle doesn't eat a failed primary call + delay before failing over.
+const PRIMARY_COOLDOWN_MS = 15 * 60 * 1000;
+let _primaryDisabledUntil = 0;
+
+function isProviderBalanceError(error) {
+  const status = error?.status ?? error?.response?.status ?? error?.code;
+  if (status === 402 || status === 401 || status === 403) return true;
+  const msg = String(error?.message || error?.error?.message || "").toLowerCase();
+  return (
+    msg.includes("insufficient balance") ||
+    msg.includes("insufficient_quota") ||
+    msg.includes("insufficient funds") ||
+    msg.includes("payment required") ||
+    msg.includes("exceeded your current quota")
+  );
+}
+
 const MUTATING_TOOL_INTENTS = /\b(deploy|open paper|paper position|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|paper position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
@@ -199,22 +227,35 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
       let response;
       let usedModel = activeModel;
+      // Provider failover: start on the OpenRouter fallback if the primary is
+      // still inside its balance-error cooldown window.
+      let useFallbackProvider = !!fallbackClient && Date.now() < _primaryDisabledUntil;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|open paper|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
+          const activeClient = useFallbackProvider ? fallbackClient : client;
           const reqParams = {
-            model: usedModel,
+            model: useFallbackProvider ? FALLBACK_PROVIDER_MODEL : usedModel,
             messages,
             tools: getToolsForRole(agentType, goal),
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
           };
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
-          response = await client.chat.completions.create(reqParams);
+          response = await activeClient.chat.completions.create(reqParams);
         } catch (error) {
+          // Primary provider out of balance/credits → fail over to OpenRouter
+          if (isProviderBalanceError(error) && fallbackClient && !useFallbackProvider) {
+            useFallbackProvider = true;
+            _primaryDisabledUntil = Date.now() + PRIMARY_COOLDOWN_MS;
+            log("agent", `Primary LLM provider balance/credit error — failing over to OpenRouter (${FALLBACK_PROVIDER_MODEL}) for ${PRIMARY_COOLDOWN_MS / 60000}m`);
+            import("./telegram.js").then(t => t.notifyLlmFallback?.({ reason: error?.message, model: FALLBACK_PROVIDER_MODEL })).catch(() => {});
+            attempt -= 1;
+            continue;
+          }
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
             messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
@@ -380,9 +421,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
+        // Lock deploy_position after first REAL attempt only — not safety-check blocks
         // For close/swap: only lock on success so genuine failures can be retried
-        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
+        if (NO_RETRY_TOOLS.has(functionName) && !result?.blocked) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {

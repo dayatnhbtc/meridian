@@ -71,15 +71,26 @@ export async function getWalletBalances() {
     return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
   }
 
+  const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
+  let data;
   try {
-    const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-    const res = await fetch(url);
-    
-    if (!res.ok) {
-      throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
+    // Retry on transient network errors (fetch failed, timeout, 5xx)
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
+        data = await res.json();
+        break;
+      } catch (fetchErr) {
+        if (attempt < maxRetries) {
+          log("wallet_error", `Helius fetch attempt ${attempt + 1} failed: ${fetchErr.message} — retrying in 1s`);
+          await new Promise(r => setTimeout(r, 1000));
+        } else {
+          throw fetchErr;
+        }
+      }
     }
-
-    const data = await res.json();
     const balances = data.balances || [];
 
     // ─── Find SOL and USDC ────────────────────────────────────
@@ -109,7 +120,7 @@ export async function getWalletBalances() {
       total_usd: Math.round((data.totalUsdValue || 0) * 100) / 100,
     };
   } catch (error) {
-    log("wallet_error", error.message);
+    log("wallet_error", `getWalletBalances failed after retries: ${error.message}`);
     return {
       wallet: walletAddress,
       sol: 0,
@@ -118,7 +129,7 @@ export async function getWalletBalances() {
       usdc: 0,
       tokens: [],
       total_usd: 0,
-      error: error.message,
+      error: `Wallet balance fetch failed: ${error.message}`,
     };
   }
 }

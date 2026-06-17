@@ -38,6 +38,11 @@ if (u.walletKey) process.env.WALLET_PRIVATE_KEY ||= u.walletKey;
 if (u.llmModel)  process.env.LLM_MODEL          ||= u.llmModel;
 if (u.llmBaseUrl) process.env.LLM_BASE_URL      ||= u.llmBaseUrl;
 if (u.llmApiKey)  process.env.LLM_API_KEY       ||= u.llmApiKey;
+// Fallback provider (used when the primary returns a balance/credit/auth error).
+// Defaults to OpenRouter via OPENROUTER_API_KEY when these are unset.
+if (u.llmFallbackBaseUrl) process.env.LLM_FALLBACK_BASE_URL ||= u.llmFallbackBaseUrl;
+if (u.llmFallbackApiKey)  process.env.LLM_FALLBACK_API_KEY  ||= u.llmFallbackApiKey;
+if (u.llmFallbackModel)   process.env.LLM_FALLBACK_MODEL    ||= u.llmFallbackModel;
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
@@ -120,6 +125,7 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeFastCloseWaitMinutes: u.outOfRangeFastCloseWaitMinutes ?? null,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,

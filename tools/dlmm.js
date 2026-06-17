@@ -2012,8 +2012,10 @@ export async function closePosition({ position_address, reason }) {
           // Populate SOL/USD PnL from fallback values
           pnlSol = config.management.solMode ? pnlUsd : 0;
           pnlSolPct = config.management.solMode ? pnlPct : 0;
-          pnlUsdAlways = config.management.solMode ? 0 : pnlUsd;
-          pnlUsdAlwaysPct = config.management.solMode ? 0 : pnlPct;
+          pnlUsdAlways = config.management.solMode ? pnlTrueUsd : pnlUsd;
+          pnlUsdAlwaysPct = config.management.solMode
+            ? (initialUsd > 0 ? (pnlTrueUsd / initialUsd) * 100 : 0)
+            : pnlPct;
         }
       }
 

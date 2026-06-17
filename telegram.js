@@ -705,6 +705,20 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
   );
 }
 
+let _lastLlmAlertAt = 0;
+export async function notifyLlmFallback({ reason, model } = {}) {
+  // Rate-limit: one alert per cooldown window (matches the provider cooldown).
+  const now = Date.now();
+  if (now - _lastLlmAlertAt < 15 * 60 * 1000) return;
+  _lastLlmAlertAt = now;
+  await sendHTML(
+    `🚨 <b>LLM provider utama gangguan</b>\n` +
+    `Error: <code>${escapeHtml(String(reason || "unknown").slice(0, 140))}</code>\n` +
+    `↪️ Beralih ke fallback OpenRouter (<code>${escapeHtml(model || "?")}</code>) selama 15 menit.\n` +
+    `Cek saldo/kredit provider utama — screening/deploy mungkin terganggu sampai diisi.`
+  ).catch(() => {});
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
