@@ -10,7 +10,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, getPoolDetail } from "./tools/screening.js";
 import { formatPortfolioReport, formatDailyPnlReport } from "./report-format.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -18,7 +18,11 @@ import {
   sendMessage,
   sendMessageWithButtons,
   sendHTML,
+  sendRichMarkdown,
+  sendRichHTML,
   editMessage,
+  editRichMarkdown,
+  editRichHTML,
   editMessageWithButtons,
   answerCallbackQuery,
   notifyOutOfRange,
@@ -26,12 +30,13 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing, generateLessonsReport } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, adoptPosition } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, queueTakeProfitConfirmation, resolvePendingTakeProfit, consumeConfirmedTakeProfit, adoptPosition, queueReentry, drainReentryQueue, peekReentryQueue } from "./state.js";
 import { getActiveStrategy, getTakeProfitPctForLpStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { formatCloseReason } from "./close-reasons.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
@@ -59,6 +64,7 @@ if (isMain) {
 
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
+const MANAGEMENT_INDICATOR_EXIT_PRESETS = new Set(["rsi_bb_or_macd_tp"]);
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -97,10 +103,13 @@ let _screeningLastTriggered = 0; // epoch ms — prevents management from spammi
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
+const _takeProfitConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
+const HARD_TP_CONFIRM_DELAY_MS = 5_000;
+const HARD_TP_CONFIRM_TOLERANCE = 0.85;
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
@@ -164,6 +173,31 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   }, TRAILING_DROP_CONFIRM_DELAY_MS);
 
   _trailingDropConfirmTimers.set(positionAddress, timer);
+}
+
+function scheduleTakeProfitConfirmation(positionAddress) {
+  if (!positionAddress || _takeProfitConfirmTimers.has(positionAddress)) return;
+
+  const timer = setTimeout(async () => {
+    _takeProfitConfirmTimers.delete(positionAddress);
+    try {
+      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      const position = result?.positions?.find((p) => p.position === positionAddress);
+      const resolved = resolvePendingTakeProfit(
+        positionAddress,
+        position?.pnl_pct ?? null,
+        HARD_TP_CONFIRM_TOLERANCE,
+      );
+      if (resolved?.confirmed) {
+        log("state", `[Hard TP recheck] Confirmed take-profit exit for ${positionAddress} — triggering management`);
+        runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Hard TP recheck management failed: ${e.message}`));
+      }
+    } catch (error) {
+      log("state_warn", `Hard TP confirmation failed for ${positionAddress}: ${error.message}`);
+    }
+  }, HARD_TP_CONFIRM_DELAY_MS);
+
+  _takeProfitConfirmTimers.set(positionAddress, timer);
 }
 
 async function runBriefing() {
@@ -283,6 +317,36 @@ export async function runManagementCycle({ silent = false } = {}) {
       }
     }
 
+    const indicatorExitMap = new Map();
+    if (
+      config.indicators.enabled &&
+      MANAGEMENT_INDICATOR_EXIT_PRESETS.has(config.indicators.exitPreset)
+    ) {
+      const indicatorChecks = await Promise.all(
+        positionData.map(async (p) => {
+          if (!p.base_mint) return { position: p.position, confirmation: null };
+          try {
+            const confirmation = await confirmIndicatorPreset({
+              mint: p.base_mint,
+              side: "exit",
+              refresh: true,
+            });
+            return { position: p.position, pair: p.pair, confirmation };
+          } catch (error) {
+            log("indicators_warn", `Exit indicator failed for ${p.pair}: ${error.message}`);
+            return { position: p.position, pair: p.pair, confirmation: null };
+          }
+        }),
+      );
+
+      for (const { position, pair, confirmation } of indicatorChecks) {
+        if (!confirmation || confirmation.skipped || !confirmation.confirmed) continue;
+        const reason = formatCloseReason("TP", `Indicator exit ${confirmation.preset}: ${confirmation.reason}`);
+        indicatorExitMap.set(position, reason);
+        log("state", `Indicator exit for ${pair}: ${reason}`);
+      }
+    }
+
     // ── Deterministic rule checks (no LLM) ──────────────────────────
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
@@ -290,6 +354,10 @@ export async function runManagementCycle({ silent = false } = {}) {
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        continue;
+      }
+      if (indicatorExitMap.has(p.position)) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 2, reason: indicatorExitMap.get(p.position) });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -300,6 +368,14 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        if (closeRule.needs_confirmation && closeRule.rule === 2) {
+          if (queueTakeProfitConfirmation(p.position, closeRule.take_profit_pnl_pct, closeRule.reason)) {
+            scheduleTakeProfitConfirmation(p.position);
+            log("state", `Hard TP recheck queued for ${p.pair}: ${closeRule.reason}`);
+          }
+          actionMap.set(p.position, { action: "STAY" });
+          continue;
+        }
         actionMap.set(p.position, closeRule);
         continue;
       }
@@ -377,6 +453,43 @@ After executing, write a brief one-line result per position.
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
+
+    // ── Reentry: detect OOR closes and queue viable pools ──────────
+    if (afterCount < config.risk.maxPositions) {
+      const recentEvents = getStateSummary().recent_events || [];
+      const recentOorCloses = recentEvents
+        .filter((e) => e.action === "close" && e.reason?.includes("[OOR]"))
+        .slice(-3); // max 3 recent OOR closes
+
+      for (const evt of recentOorCloses) {
+        if (!evt.pool_name) continue;
+        try {
+          // Look up the tracked position to get the actual pool address
+          const tracked = getTrackedPosition(evt.position);
+          const poolAddress = tracked?.pool || evt.pool_address || evt.position;
+          const detail = await getPoolDetail({ pool_address: poolAddress });
+          if (detail) {
+            const feeTvl = detail.fee_active_tvl_ratio ?? detail.fee_tvl_ratio ?? 0;
+            const vol = detail.volume_window ?? detail.volume_24h ?? 0;
+            const tvl = detail.tvl ?? detail.active_tvl ?? 0;
+
+            // Only queue reentry if pool still has decent fundamentals
+            if (feeTvl >= 0.3 && vol >= 500 && tvl >= 5000) {
+              queueReentry(poolAddress, evt.pool_name, {
+                fee_tvl: feeTvl,
+                volume: vol,
+                tvl: tvl,
+                position_addr: evt.position,
+              });
+            } else {
+              log("reentry", `Skipping reentry for ${evt.pool_name} — weak fundamentals (fee/TVL=${feeTvl}, vol=$${vol}, TVL=$${tvl})`);
+            }
+          }
+        } catch (e) {
+          log("reentry_warn", `Failed to validate reentry candidate ${evt.pool_name}: ${e.message}`);
+        }
+      }
+    }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
     mgmtReport = `Management cycle failed: ${error.message}`;
@@ -385,7 +498,7 @@ After executing, write a brief one-line result per position.
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendRichMarkdown(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -464,6 +577,45 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
+
+    // ── Inject reentry candidates ──────────────────────────────────
+    const reentryQueue = drainReentryQueue();
+    let reentryCandidateBlocks = [];
+    if (reentryQueue.length > 0) {
+      const existingPoolAddrs = new Set(candidates.map((p) => p.pool || p.pool_address));
+      for (const re of reentryQueue) {
+        if (existingPoolAddrs.has(re.pool_address)) continue; // already in candidate list
+        try {
+          const detail = await getPoolDetail({ pool_address: re.pool_address });
+          if (detail) {
+            // Wrap in the same format as screening candidates
+            const enriched = {
+              pool: detail.pool_address || re.pool_address,
+              name: detail.name || re.pool_name,
+              base: { mint: detail.token_x?.address, symbol: detail.token_x?.symbol },
+              quote: { mint: detail.token_y?.address, symbol: detail.token_y?.symbol },
+              bin_step: detail.dlmm_params?.bin_step,
+              fee_pct: detail.fee_pct,
+              tvl: detail.tvl ?? detail.active_tvl,
+              active_tvl: detail.active_tvl,
+              volume_window: detail.volume_window ?? detail.volume_24h,
+              fee_active_tvl_ratio: detail.fee_active_tvl_ratio ?? detail.fee_tvl_ratio,
+              volatility: detail.volatility,
+              organic_score: detail.token_x?.organic_score,
+              mcap: detail.token_x?.market_cap,
+              _is_reentry: true,
+              _reentry_position: re.detail?.position_addr,
+              pool_address: detail.pool_address || re.pool_address,
+            };
+            candidates.unshift(enriched);
+            reentryCandidateBlocks.push(`🔄 REENTRY: ${enriched.name} — previously closed OOR but fundamentals still healthy (fee/TVL=${re.detail?.fee_tvl}, vol=$${re.detail?.volume}, TVL=$${re.detail?.tvl})`);
+            log("reentry", `Injected ${enriched.name} as reentry candidate in screening cycle`);
+          }
+        } catch (e) {
+          log("reentry_warn", `Failed to fetch reentry pool ${re.pool_name}: ${e.message}`);
+        }
+      }
+    }
 
     const allCandidates = [];
     for (const pool of candidates) {
@@ -575,7 +727,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         : null;
 
       const block = [
-        `POOL: ${pool.name} (${pool.pool})`,
+        `POOL: ${pool.name} (${pool.pool})${pool._is_reentry ? ' 🔄 REENTRY' : ''}`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         pvpLine,
@@ -586,21 +738,55 @@ export async function runScreeningCycle({ silent = false } = {}) {
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
 
-      // Stage signals for Darwinian weighting — captured before LLM decides
-      if (config.darwin?.enabled) {
-        const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
-        stageSignals(pool.pool, {
-          base_mint:             baseMint,
-          organic_score:         pool.organic_score         ?? null,
-          fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
-          volume:                pool.volume_window         ?? null,
-          mcap:                  pool.mcap                  ?? null,
-          holder_count:          ti?.holders                ?? null,
-          smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
-          narrative_quality:     n?.narrative ? "present" : "absent",
-          volatility:            pool.volatility            ?? null,
-        });
-      }
+      // Stage entry metrics — captured before the LLM decides. Always recorded
+      // (NOT gated on Darwin) so entry quality stays measurable for later analysis.
+      // Everything here rides into signal_snapshot → state.json → performance[].
+      const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
+      const numOrNull = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      // Compact indicator snapshot (RSI/MACD/BB/Supertrend) from the entry confirmation.
+      const indicatorSnapshot = (() => {
+        const c = pool.indicator_confirmation;
+        if (!c || c.enabled === false) return null;
+        const sig = (c.intervals || []).find((iv) => iv?.ok && iv?.signal)?.signal || null;
+        return {
+          preset:              c.preset ?? config.indicators.entryPreset ?? null,
+          confirmed:           c.confirmed ?? null,
+          skipped:             c.skipped ?? false,
+          reason:              c.reason ?? null,
+          rsi:                 sig?.rsi ?? null,
+          macd_hist:           sig?.macdHistogram ?? null,
+          supertrend_dir:      sig?.supertrendDirection ?? null,
+          supertrend_break_up: sig?.supertrendBreakUp ?? null,
+          close:               sig?.close ?? null,
+          bb_upper:            sig?.upperBand ?? null,
+          bb_mid:              sig?.middleBand ?? null,
+          bb_lower:            sig?.lowerBand ?? null,
+        };
+      })();
+      stageSignals(pool.pool, {
+        base_mint:             baseMint,
+        organic_score:         pool.organic_score         ?? null,
+        fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
+        volume:                pool.volume_window         ?? null,
+        mcap:                  pool.mcap                  ?? null,
+        holder_count:          ti?.holders                ?? null,
+        smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
+        narrative_quality:     n?.narrative ? "present" : "absent",
+        volatility:            pool.volatility            ?? null,
+        // ── entry audit metrics (newly captured for analysis) ──
+        bin_step:              pool.bin_step              ?? null,
+        fee_pct:               pool.fee_pct               ?? null,
+        top10_pct:             numOrNull(top10Pct),
+        bot_holders_pct:       numOrNull(botPct),
+        global_fees_sol:       numOrNull(feesSol),
+        launchpad:             launchpad                  ?? null,
+        token_age_hours:       pool.token_age_hours       ?? null,
+        active_bin_at_deploy:  numOrNull(activeBin),
+        price_change_1h:       numOrNull(priceChange),
+        net_buyers_1h:         numOrNull(netBuyers),
+        // ── indicator confirmation snapshot (RSI/MACD/BB/Supertrend at entry) ──
+        indicator:             indicatorSnapshot,
+      });
 
       return block;
     });
@@ -616,7 +802,7 @@ Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
-
+${reentryCandidateBlocks.length > 0 ? `\nNOTE — Reentry candidates marked 🔄 were previously deployed and closed due to temporary OOR, but the pool still looks healthy. Give these extra consideration — the setup was already validated once.\n` : ''}
 STEPS:
 1. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
 2. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
@@ -711,7 +897,7 @@ IMPORTANT:
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        else sendRichMarkdown(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
   }
@@ -796,6 +982,13 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
+          if (closeRule.needs_confirmation && closeRule.rule === 2) {
+            if (queueTakeProfitConfirmation(p.position, closeRule.take_profit_pnl_pct, closeRule.reason)) {
+              scheduleTakeProfitConfirmation(p.position);
+              log("state", `[PnL poll] Hard TP recheck queued for ${p.pair}: ${closeRule.reason}`);
+            }
+            continue;
+          }
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
           if (sinceLastTrigger >= cooldownMs) {
@@ -887,6 +1080,17 @@ function formatCandidates(candidates) {
   ].join("\n");
 }
 
+function getSevereOorFastCloseWaitMinutes(managementConfig) {
+  const configured = Number(managementConfig?.outOfRangeFastCloseWaitMinutes);
+  if (Number.isFinite(configured) && configured >= 0) return configured;
+  const normalWait = Number(managementConfig?.outOfRangeWaitMinutes ?? 30);
+  const boundedNormalWait = Number.isFinite(normalWait) && normalWait >= 0 ? normalWait : 30;
+  // Severe OOR can close faster than the normal wait, but never on the same
+  // tick it was deployed/first marked OOR. This prevents instant 0m closes on
+  // single-side SOL ranges whose upper bin is exactly the deploy active bin.
+  return Math.min(3, boundedNormalWait);
+}
+
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
@@ -904,19 +1108,36 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: formatCloseReason("SL", `PnL ${Number(position.pnl_pct).toFixed(2)}% <= stopLossPct ${managementConfig.stopLossPct}%`) };
   }
+  const confirmedTakeProfitReason = !pnlSuspect ? consumeConfirmedTakeProfit(position.position) : null;
+  if (confirmedTakeProfitReason) {
+    return { action: "CLOSE", rule: 2, reason: confirmedTakeProfitReason, confirmed_recheck: true };
+  }
   const strategyName = position.strategy || tracked?.strategy;
   const strategyTakeProfitPct = getTakeProfitPctForLpStrategy(strategyName);
   const takeProfitPct = strategyTakeProfitPct ?? managementConfig.takeProfitPct;
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= takeProfitPct) {
     const strategyLabel = strategyName ? ` (${strategyName})` : "";
-    return { action: "CLOSE", rule: 2, reason: formatCloseReason("TP", `PnL ${Number(position.pnl_pct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`) };
+    const reason = formatCloseReason("TP", `PnL ${Number(position.pnl_pct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`);
+    return { action: "CLOSE", rule: 2, reason, needs_confirmation: shouldUsePnlRecheck(), take_profit_pnl_pct: Number(position.pnl_pct) };
   }
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: formatCloseReason("OOR", `active bin ${position.active_bin} above upper range ${position.upper_bin}`) };
+    const severeOorWaitMinutes = getSevereOorFastCloseWaitMinutes(managementConfig);
+    const minutesOOR = Math.max(0, Number(position.minutes_out_of_range) || 0);
+    const ageMinutes = Math.max(0, Number(position.age_minutes) || 0);
+    if (minutesOOR >= severeOorWaitMinutes && ageMinutes >= severeOorWaitMinutes) {
+      return {
+        action: "CLOSE",
+        rule: 3,
+        reason: formatCloseReason(
+          "OOR",
+          `active bin ${position.active_bin} above upper range ${position.upper_bin} by ${position.active_bin - position.upper_bin} bins, out of range ${minutesOOR}m (fast limit: ${severeOorWaitMinutes}m)`,
+        ),
+      };
+    }
   }
   if (
     position.active_bin != null &&
@@ -1046,6 +1267,7 @@ function settingValue(key) {
     indicatorEntryPreset: config.indicators.entryPreset,
     indicatorExitPreset: config.indicators.exitPreset,
     rsiLength: config.indicators.rsiLength,
+    rsiTakeProfitOverbought: config.indicators.rsiTakeProfitOverbought,
     indicatorIntervals: config.indicators.intervals,
     requireAllIntervals: config.indicators.requireAllIntervals,
   };
@@ -1151,7 +1373,11 @@ function renderSettingsMenu(page = "main") {
         settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
         settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
       ],
+      [
+        settingButton("Exit: RSI+BB/MACD", "cfg:set:indicatorExitPreset:rsi_bb_or_macd_tp"),
+      ],
       stepButtons("rsiLength", "RSI len", 1, { digits: 0 }),
+      stepButtons("rsiTakeProfitOverbought", "TP RSI", 1, { digits: 0 }),
     ];
   } else {
     rows = [
@@ -1229,6 +1455,7 @@ async function applySettingsMenuCallback(msg) {
     value = Number((current + delta).toFixed(4));
     if (key === "maxPositions") value = Math.max(1, Math.round(value));
     if (key === "rsiLength") value = Math.max(2, Math.round(value));
+    if (key === "rsiTakeProfitOverbought") value = Math.max(1, Math.round(value));
     if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
     if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
@@ -1249,7 +1476,7 @@ async function applySettingsMenuCallback(msg) {
     await answerCallbackQuery(msg.callbackQueryId, "Config update failed");
     return;
   }
-  page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
+  page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "rsiTakeProfitOverbought" || key === "requireAllIntervals"
     ? "indicators"
     : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
       ? "screen"
@@ -1436,7 +1663,9 @@ async function telegramHandler(msg) {
   if (text === "/pnl") {
     try {
       const { positions } = await getMyPositions({ force: true });
-      await sendHTML(formatDailyPnlReport({ openPositions: positions || [], compact: true })).catch(() => {});
+      const perf = getPerformanceHistory({ hours: 24 });
+      const realizedPositions = perf?.positions || [];
+      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [], compact: true })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1444,7 +1673,9 @@ async function telegramHandler(msg) {
   if (text === "/pnltoday") {
     try {
       const { positions } = await getMyPositions({ force: true });
-      await sendHTML(formatDailyPnlReport({ openPositions: positions || [] })).catch(() => {});
+      const perf = getPerformanceHistory({ hours: 24 });
+      const realizedPositions = perf?.positions || [];
+      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [] })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1476,7 +1707,7 @@ async function telegramHandler(msg) {
         [],
         "GENERAL"
       );
-      await sendHTML(reply).catch(() => sendMessage(stripThink(reply)).catch(() => {}));
+      await sendHTML(reply).catch(() => sendRichMarkdown(stripThink(reply)).catch(() => {}));
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1723,7 +1954,7 @@ async function telegramHandler(msg) {
     });
     appendHistory(text, content);
     if (liveMessage) await liveMessage.finalize(stripThink(content));
-    else await sendMessage(stripThink(content));
+    else await sendRichMarkdown(stripThink(content));
   } catch (e) {
     if (liveMessage) await liveMessage.fail(e.message).catch(() => {});
     else await sendMessage(`Error: ${e.message}`).catch(() => {});

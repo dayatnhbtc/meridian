@@ -76,6 +76,10 @@ export const config = {
     // HARD ENTRY FLOOR: reject dead/no-fee pools before the LLM sees them.
     // Keep this as a low viability gate; quality/risk is handled by memory, cooldowns, and LLM review.
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.12,
+    // When false, use the fixed minFeeActiveTvlRatio floor instead of letting the
+    // entry bar chase the live market median (which pushes entries into the hottest,
+    // most-volatile pools → more OOR churn).
+    adaptiveFeeTvl:    u.adaptiveFeeTvl    ?? true,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -253,6 +257,10 @@ export const config = {
     candles: indicatorUserConfig.candles ?? 298,
     rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
+    rsiTakeProfitOverbought: indicatorUserConfig.rsiTakeProfitOverbought ?? 90,
+    // healthy_breakout anti-blow-off guards:
+    rsiBlowoff: indicatorUserConfig.rsiBlowoff ?? 88,      // RSI at/above = climactic, skip
+    bbStretchPct: indicatorUserConfig.bbStretchPct ?? 3,   // close >X% above BB upper = parabolic, skip
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
 };

@@ -103,6 +103,7 @@
     "candles": 298,
     "rsiOversold": 30,
     "rsiOverbought": 80,
+    "rsiTakeProfitOverbought": 90,
     "requireAllIntervals": false
   },
   "telegramChatId": "",

@@ -748,7 +748,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const configFeeTvlFloor = Number(config.screening.minFeeActiveTvlRatio ?? 0);
-  const minFeeActiveTvlRatio = computeAdaptiveFeeTvlThreshold(pools, configFeeTvlFloor);
+  const minFeeActiveTvlRatio = config.screening.adaptiveFeeTvl === false
+    ? configFeeTvlFloor
+    : computeAdaptiveFeeTvlThreshold(pools, configFeeTvlFloor);
 
   const eligible = pools
     .filter((p) => {

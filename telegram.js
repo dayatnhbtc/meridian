@@ -221,6 +221,48 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   });
 }
 
+// ─── Rich Message (Bot API 10.1+) ────────────────────────────────────
+// Supports GFM + block-level HTML: headings, tables, lists, blockquotes,
+// task lists, collapsible details, formulas. Up to 32768 chars, 500 blocks.
+
+const RICH_MSG_LIMIT = 32768;
+
+export async function sendRichMarkdown(text) {
+  if (!TOKEN || !chatId) return;
+  const safe = String(text).slice(0, RICH_MSG_LIMIT);
+  return postTelegram("sendRichMessage", {
+    rich_message: { markdown: safe },
+  });
+}
+
+export async function sendRichHTML(text) {
+  if (!TOKEN || !chatId) return;
+  const safe = String(text).replace(/"/g, "&quot;").slice(0, RICH_MSG_LIMIT);
+  return postTelegram("sendRichMessage", {
+    rich_message: { html: safe },
+  });
+}
+
+export async function editRichMarkdown(text, messageId) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  const safe = String(text).slice(0, RICH_MSG_LIMIT);
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    rich_message: { markdown: safe },
+  });
+}
+
+export async function editRichHTML(text, messageId) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  const safe = String(text).replace(/"/g, "&quot;").slice(0, RICH_MSG_LIMIT);
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    rich_message: { html: safe },
+  });
+}
+
+// ─── Callback Query ──────────────────────────────────────────────
+
 export async function answerCallbackQuery(callbackQueryId, text = "") {
   if (!TOKEN || !callbackQueryId) return null;
   return postTelegramRaw("answerCallbackQuery", {
@@ -315,6 +357,7 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
   if (!TOKEN || !chatId) return null;
   const typing = createTypingIndicator();
   const useHTML = options.parseMode === "HTML";
+  const useRich = options.richMode ?? true; // default to rich markdown
 
   const state = {
     title,
@@ -324,7 +367,7 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
     messageId: null,
     flushTimer: null,
     flushPromise: null,
-    flushRequested: false,
+    flushRequested: null,
   };
 
   function render() {
@@ -332,7 +375,7 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
     if (state.intro) sections.push(state.intro);
     if (state.toolLines.length > 0) sections.push(state.toolLines.join("\n"));
     if (state.footer) sections.push(state.footer);
-    return sections.join("\n\n").slice(0, 4096);
+    return sections.join("\n\n").slice(0, RICH_MSG_LIMIT);
   }
 
   async function flushNow() {
@@ -340,11 +383,15 @@ export async function createLiveMessage(title, intro = "Starting...", options = 
     state.flushRequested = false;
     const text = render();
     if (!state.messageId) {
-      const sent = useHTML ? await sendHTML(text) : await sendMessage(text);
+      let sent;
+      if (useRich) sent = await sendRichMarkdown(text);
+      else if (useHTML) sent = await sendHTML(text);
+      else sent = await sendMessage(text);
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    if (useHTML) await editHTML(text, state.messageId);
+    if (useRich) await editRichMarkdown(text, state.messageId);
+    else if (useHTML) await editHTML(text, state.messageId);
     else await editMessage(text, state.messageId);
   }
 

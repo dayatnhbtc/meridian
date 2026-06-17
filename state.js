@@ -122,6 +122,11 @@ export function trackPosition({
     pending_trailing_started_at: null,
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
+    pending_take_profit_pnl_pct: null,
+    pending_take_profit_reason: null,
+    pending_take_profit_started_at: null,
+    confirmed_take_profit_exit_reason: null,
+    confirmed_take_profit_exit_until: null,
     trailing_active: false,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
@@ -206,6 +211,11 @@ export function adoptPosition(pos, poolDetail) {
     pending_trailing_started_at: null,
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
+    pending_take_profit_pnl_pct: null,
+    pending_take_profit_reason: null,
+    pending_take_profit_started_at: null,
+    confirmed_take_profit_exit_reason: null,
+    confirmed_take_profit_exit_until: null,
     trailing_active: false,
   };
   pushEvent(state, { action: "manual_adopt", position: pos.position, pool_name: pos.pair });
@@ -429,6 +439,73 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   return { confirmed: false, rejected: true };
 }
 
+export function queueTakeProfitConfirmation(position_address, candidatePnlPct, reason) {
+  if (candidatePnlPct == null || !reason) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+
+  const changed =
+    pos.pending_take_profit_pnl_pct == null ||
+    candidatePnlPct > pos.pending_take_profit_pnl_pct ||
+    reason !== pos.pending_take_profit_reason;
+
+  if (!changed) return false;
+
+  pos.pending_take_profit_pnl_pct = candidatePnlPct;
+  pos.pending_take_profit_reason = reason;
+  pos.pending_take_profit_started_at = new Date().toISOString();
+  save(state);
+  log("state", `Position ${position_address} hard TP candidate ${candidatePnlPct.toFixed(2)}% queued for confirmation`);
+  return true;
+}
+
+export function resolvePendingTakeProfit(position_address, currentPnlPct, toleranceRatio = 0.85) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.pending_take_profit_pnl_pct == null) return { confirmed: false, pending: false };
+
+  const pendingPnl = pos.pending_take_profit_pnl_pct;
+  const pendingReason = pos.pending_take_profit_reason;
+  pos.pending_take_profit_pnl_pct = null;
+  pos.pending_take_profit_reason = null;
+  pos.pending_take_profit_started_at = null;
+
+  if (currentPnlPct != null && currentPnlPct >= pendingPnl * toleranceRatio) {
+    pos.confirmed_take_profit_exit_reason = pendingReason;
+    pos.confirmed_take_profit_exit_until = new Date(Date.now() + 30_000).toISOString();
+    save(state);
+    log("state", `Position ${position_address} hard TP confirmed after recheck: pending ${pendingPnl.toFixed(2)}%, current ${currentPnlPct.toFixed(2)}%`);
+    return { confirmed: true, reason: pendingReason };
+  }
+
+  save(state);
+  log("state", `Position ${position_address} rejected hard TP ${pendingPnl.toFixed(2)}% after recheck (current: ${currentPnlPct ?? "?"}%)`);
+  return { confirmed: false, rejected: true, pendingPnl };
+}
+
+export function consumeConfirmedTakeProfit(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+
+  const until = pos.confirmed_take_profit_exit_until
+    ? new Date(pos.confirmed_take_profit_exit_until).getTime()
+    : 0;
+  const reason = pos.confirmed_take_profit_exit_reason || null;
+
+  if (reason && until > Date.now()) {
+    return reason;
+  }
+
+  if (pos.confirmed_take_profit_exit_reason || pos.confirmed_take_profit_exit_until) {
+    pos.confirmed_take_profit_exit_reason = null;
+    pos.confirmed_take_profit_exit_until = null;
+    save(state);
+  }
+  return null;
+}
+
 /**
  * Get all tracked positions (optionally filter open-only).
  */
@@ -629,4 +706,68 @@ export function syncOpenPositions(active_addresses) {
   }
 
   if (changed) save(state);
+}
+
+// ─── Reentry Queue ──────────────────────────────────────────────
+// When a position is closed due to OOR but the pool is still fundamentally
+// strong, we queue it for priority re-deploy so the screening cycle can
+// consider re-entering the same pool instead of treating it as a failure.
+
+const REENTRY_KEY = "_reentryQueue";
+
+/**
+ * Queue a pool for priority reentry after an OOR close.
+ */
+export function queueReentry(poolAddress, poolName, poolDetail = {}) {
+  const state = load();
+  if (!state[REENTRY_KEY]) state[REENTRY_KEY] = [];
+
+  const existing = state[REENTRY_KEY].find((r) => r.pool_address === poolAddress);
+  if (existing) {
+    existing.queued_at = new Date().toISOString();
+  } else {
+    state[REENTRY_KEY].push({
+      pool_address: poolAddress,
+      pool_name: poolName,
+      queued_at: new Date().toISOString(),
+      detail: poolDetail,
+    });
+  }
+
+  if (state[REENTRY_KEY].length > 5) {
+    state[REENTRY_KEY] = state[REENTRY_KEY].slice(-5);
+  }
+
+  save(state);
+  log("reentry", `Queued ${poolName} (${poolAddress.slice(0, 8)}...) for priority re-deploy`);
+}
+
+/**
+ * Get and clear the reentry queue atomically.
+ */
+export function drainReentryQueue() {
+  const state = load();
+  const queue = state[REENTRY_KEY] || [];
+  if (queue.length === 0) return [];
+  state[REENTRY_KEY] = [];
+  save(state);
+  return queue;
+}
+
+/**
+ * Peek at the queue without draining.
+ */
+export function peekReentryQueue() {
+  const state = load();
+  return state[REENTRY_KEY] || [];
+}
+
+/**
+ * Remove a specific pool from the reentry queue.
+ */
+export function removeFromReentryQueue(poolAddress) {
+  const state = load();
+  if (!state[REENTRY_KEY]) return;
+  state[REENTRY_KEY] = state[REENTRY_KEY].filter((r) => r.pool_address !== poolAddress);
+  save(state);
 }

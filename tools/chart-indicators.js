@@ -17,14 +17,43 @@ function safeNum(value) {
   return safeNumber(value, null);
 }
 
+function firstSafeNum(...values) {
+  for (const value of values) {
+    const num = safeNum(value);
+    if (num != null) return num;
+  }
+  return null;
+}
+
 function buildSignalSummary(payload) {
   const latest = payload?.latest || {};
   const candle = latest?.candle || {};
   const previousCandle = latest?.previousCandle || {};
   const rsi = safeNum(latest?.rsi?.value);
   const bollinger = latest?.bollinger || {};
+  const macd = latest?.macd || {};
+  const previousMacd = latest?.previousMacd || latest?.previous?.macd || payload?.previous?.macd || {};
   const supertrend = latest?.supertrend || {};
   const fibonacciLevels = latest?.fibonacci?.levels || {};
+  const macdHistogram = firstSafeNum(
+    macd.histogram,
+    macd.histogramValue,
+    macd.hist,
+    latest?.macdHistogram,
+  );
+  const previousMacdHistogram = firstSafeNum(
+    previousMacd.histogram,
+    previousMacd.histogramValue,
+    previousMacd.hist,
+    latest?.previousMacdHistogram,
+    payload?.previous?.macdHistogram,
+  );
+  const explicitFirstGreenMacd =
+    latest?.states?.macdFirstGreenHistogram ??
+    latest?.states?.macdFirstGreen ??
+    latest?.macdFirstGreenHistogram ??
+    latest?.macdFirstGreen;
+  const hasExplicitFirstGreenMacd = typeof explicitFirstGreenMacd === "boolean";
   return {
     close: safeNum(candle.close),
     previousClose: safeNum(previousCandle.close),
@@ -32,6 +61,12 @@ function buildSignalSummary(payload) {
     lowerBand: safeNum(bollinger.lower),
     middleBand: safeNum(bollinger.middle),
     upperBand: safeNum(bollinger.upper),
+    macdHistogram,
+    previousMacdHistogram,
+    macdFirstGreenHistogram: typeof explicitFirstGreenMacd === "boolean"
+      ? explicitFirstGreenMacd
+      : (previousMacdHistogram != null && macdHistogram != null && previousMacdHistogram <= 0 && macdHistogram > 0),
+    macdSignalAvailable: hasExplicitFirstGreenMacd || (previousMacdHistogram != null && macdHistogram != null),
     supertrendValue: safeNum(supertrend.value),
     supertrendDirection: String(supertrend.direction || "unknown"),
     supertrendBreakUp: !!latest?.states?.supertrendBreakUp,
@@ -42,10 +77,11 @@ function buildSignalSummary(payload) {
   };
 }
 
-function evaluatePreset(side, preset, payload) {
+export function evaluatePreset(side, preset, payload) {
   const summary = buildSignalSummary(payload);
   const oversold = Number(config.indicators.rsiOversold ?? 30);
   const overbought = Number(config.indicators.rsiOverbought ?? 80);
+  const takeProfitOverbought = Number(config.indicators.rsiTakeProfitOverbought ?? 90);
   const close = summary.close;
   const previousClose = summary.previousClose;
   const lowerBand = summary.lowerBand;
@@ -159,6 +195,29 @@ function evaluatePreset(side, preset, payload) {
             reason: "Close at/above upper band with RSI overbought",
             signal: summary,
           };
+    case "rsi_bb_or_macd_tp": {
+      if (side !== "exit") {
+        return {
+          confirmed: false,
+          reason: "RSI BB/MACD TP is exit-only",
+          signal: summary,
+        };
+      }
+      const rsiHot = rsi != null && rsi > takeProfitOverbought;
+      const bbBreak = close != null && upperBand != null && close > upperBand;
+      const macdAvailable = summary.macdSignalAvailable;
+      const macdFirstGreen = macdAvailable && summary.macdFirstGreenHistogram;
+      const confirmed = rsiHot && (bbBreak || macdFirstGreen);
+      const paths = [];
+      if (bbBreak) paths.push("close above BB upper");
+      if (macdFirstGreen) paths.push("MACD first green histogram");
+      if (!macdAvailable) paths.push("MACD unavailable/skipped");
+      return {
+        confirmed,
+        reason: `RSI ${rsi ?? "n/a"} > ${takeProfitOverbought} with ${paths.join("; ") || "no BB/MACD TP trigger"}`,
+        signal: summary,
+      };
+    }
     case "fibo_reclaim":
       return side === "entry"
         ? {
@@ -193,6 +252,54 @@ function evaluatePreset(side, preset, payload) {
             reason: "Price rejected below a key Fibonacci level",
             signal: summary,
           };
+    case "healthy_breakout": {
+      // Entry signal for single-side SOL buy-the-dip: confirm a token in a
+      // confirmed uptrend with momentum, but NOT a climactic blow-off — so the
+      // expected pullback fills the position and then recovers, rather than
+      // reversing into a dump (which would strand the fill out-of-range below).
+      const blowoffRsi = Number(config.indicators.rsiBlowoff ?? config.indicators.rsiTakeProfitOverbought ?? 88);
+      const bbStretchPct = Number(config.indicators.bbStretchPct ?? 3);
+
+      // Trend up (Supertrend): flipped bullish or holding above a bullish Supertrend.
+      const bullishTrend =
+        summary.supertrendBreakUp ||
+        (isBullish && close != null && summary.supertrendValue != null && close >= summary.supertrendValue);
+      // Momentum (MACD): histogram positive. If MACD is unavailable, do not block on it.
+      const momentumUp = summary.macdSignalAvailable
+        ? (summary.macdHistogram != null && summary.macdHistogram > 0)
+        : true;
+      // Not exhausted (RSI): below the climax/blow-off zone.
+      const notRsiBlowoff = rsi == null || rsi < blowoffRsi;
+      // Not parabolic (Bollinger): price not stretched far above the upper band.
+      const notBbBlowoff =
+        upperBand == null || close == null || close <= upperBand * (1 + bbStretchPct / 100);
+
+      if (side === "entry") {
+        const confirmed = bullishTrend && momentumUp && notRsiBlowoff && notBbBlowoff;
+        const blockers = [];
+        if (!bullishTrend) blockers.push("Supertrend not bullish");
+        if (!momentumUp) blockers.push("MACD histogram <= 0");
+        if (!notRsiBlowoff) blockers.push(`RSI ${rsi ?? "n/a"} >= blow-off ${blowoffRsi}`);
+        if (!notBbBlowoff) blockers.push(`price > ${bbStretchPct}% above BB upper`);
+        return {
+          confirmed,
+          reason: confirmed
+            ? `Healthy breakout: bullish Supertrend${summary.macdSignalAvailable ? " + MACD up" : ""}, RSI ${rsi ?? "n/a"} (not overextended)`
+            : `Not a healthy breakout: ${blockers.join("; ")}`,
+          signal: summary,
+        };
+      }
+      // Exit side: trend broke down, or the move went climactic/exhausted.
+      const trendBreak = summary.supertrendBreakDown || isBearish;
+      const exhausted =
+        (rsi != null && rsi >= blowoffRsi) ||
+        (upperBand != null && close != null && close > upperBand * (1 + bbStretchPct / 100));
+      return {
+        confirmed: trendBreak || exhausted,
+        reason: trendBreak ? "Supertrend turned bearish" : exhausted ? "Climactic/exhausted move" : "Trend intact",
+        signal: summary,
+      };
+    }
     default:
       return {
         confirmed: false,

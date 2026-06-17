@@ -465,6 +465,7 @@ const toolMap = {
       indicatorCandles: ["indicators", "candles", ["chartIndicators", "candles"]],
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
+      rsiTakeProfitOverbought: ["indicators", "rsiTakeProfitOverbought", ["chartIndicators", "rsiTakeProfitOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
     };
 
