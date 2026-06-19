@@ -618,6 +618,7 @@ const PROTECTED_TOOLS = new Set([
 
 const AUTO_SWAP_MIN_USD = 0.10;
 const AUTO_SWAP_BALANCE_EPSILON = 1e-12;
+const SOL_MINTS = new Set([config.tokens.SOL, "SOL", "WSOL"]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -636,7 +637,7 @@ function tokenBalance(token) {
 function indexedTokenBalances(balances) {
   const out = new Map();
   for (const token of balances?.tokens || []) {
-    if (!token?.mint || token.mint === config.tokens.SOL) continue;
+    if (!token?.mint || SOL_MINTS.has(token.mint) || SOL_MINTS.has(token.symbol)) continue;
     out.set(token.mint, tokenBalance(token));
   }
   return out;
@@ -653,7 +654,7 @@ function eligibleCloseSwapTokens({ balances, preTokenBalances, baseMint, minUsd 
   }
 
   for (const token of tokens) {
-    if (!token?.mint || token.mint === config.tokens.SOL) continue;
+    if (!token?.mint || SOL_MINTS.has(token.mint) || SOL_MINTS.has(token.symbol)) continue;
     if (tokenUsd(token) < minUsd || tokenBalance(token) <= 0) continue;
     const previous = preTokenBalances?.get(token.mint) ?? 0;
     if (tokenBalance(token) > previous + AUTO_SWAP_BALANCE_EPSILON) {
@@ -714,7 +715,7 @@ async function autoSwapCloseProceedsToSol({ result, args, preBalances }) {
   const finalTokens = finalBalances?.tokens || [];
   result.leftover_tokens = finalTokens
     .filter((token) => {
-      if (!token?.mint || token.mint === config.tokens.SOL || tokenUsd(token) < AUTO_SWAP_MIN_USD) return false;
+      if (!token?.mint || SOL_MINTS.has(token.mint) || SOL_MINTS.has(token.symbol) || tokenUsd(token) < AUTO_SWAP_MIN_USD) return false;
       if (result.base_mint && token.mint === result.base_mint) return true;
       const previous = preTokenBalances.get(token.mint) ?? 0;
       return tokenBalance(token) > previous + AUTO_SWAP_BALANCE_EPSILON;

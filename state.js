@@ -150,6 +150,11 @@ export function adoptPosition(pos, poolDetail) {
   const poolInfo = poolDetail || {};
   const tokenX = poolInfo.token_x || {};
   const dlmm = poolInfo.dlmm_params || {};
+  const amountSol = Number.isFinite(Number(pos.amount_sol))
+    ? Number(pos.amount_sol)
+    : Number.isFinite(Number(pos.total_value_sol))
+      ? Number(pos.total_value_sol)
+      : null;
 
   state.positions[pos.position] = {
     position: pos.position,
@@ -165,7 +170,7 @@ export function adoptPosition(pos, poolDetail) {
       bins_above: 0,
       active: pos.active_bin ?? null,
     },
-    amount_sol: pos.total_value_usd ?? 0,
+    amount_sol: amountSol,
     amount_x: 0,
     active_bin_at_deploy: pos.active_bin ?? null,
     bin_step: dlmm.bin_step ?? null,
