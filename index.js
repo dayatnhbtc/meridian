@@ -1404,6 +1404,30 @@ function stepButtons(key, label, step, { digits = 2 } = {}) {
   ];
 }
 
+function todayWibWindow(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  const year = Number(get("year"));
+  const month = Number(get("month"));
+  const day = Number(get("day"));
+  const since = new Date(Date.UTC(year, month - 1, day, -7, 0, 0)).toISOString();
+  const dateLabel = `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year} WIB`;
+  return { since, dateLabel };
+}
+
+function getTodayPerformance() {
+  const { since, dateLabel } = todayWibWindow();
+  return {
+    dateLabel,
+    perf: getPerformanceHistory({ since, until: new Date().toISOString(), limit: 1000 }),
+  };
+}
+
 function renderSettingsMenu(page = "main") {
   const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
   const summary = [
@@ -1769,9 +1793,9 @@ async function telegramHandler(msg) {
   if (text === "/pnl") {
     try {
       const { positions } = await getMyPositions({ force: true });
-      const perf = getPerformanceHistory({ hours: 24 });
+      const { perf, dateLabel } = getTodayPerformance();
       const realizedPositions = perf?.positions || [];
-      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [], compact: true, solMode: config.management.solMode })).catch(() => {});
+      await sendHTML(formatDailyPnlReport({ dateLabel, realizedPositions, openPositions: positions || [], compact: true, solMode: config.management.solMode })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1779,9 +1803,9 @@ async function telegramHandler(msg) {
   if (text === "/pnltoday") {
     try {
       const { positions } = await getMyPositions({ force: true });
-      const perf = getPerformanceHistory({ hours: 24 });
+      const { perf, dateLabel } = getTodayPerformance();
       const realizedPositions = perf?.positions || [];
-      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [], solMode: config.management.solMode })).catch(() => {});
+      await sendHTML(formatDailyPnlReport({ dateLabel, realizedPositions, openPositions: positions || [], solMode: config.management.solMode })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }

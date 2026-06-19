@@ -751,17 +751,20 @@ function fmt(lessons) {
  * @param {Object} opts
  * @param {number} [opts.hours=24]   - How many hours back to look
  * @param {number} [opts.limit=50]   - Max records to return
+ * @param {string} [opts.since]      - ISO timestamp lower bound; overrides hours
+ * @param {string} [opts.until]      - ISO timestamp upper bound
  */
-export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
+export function getPerformanceHistory({ hours = 24, limit = 50, since = null, until = null } = {}) {
   const data = load();
   const p = data.performance;
 
   if (p.length === 0) return { positions: [], count: 0, hours };
 
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const cutoff = since || new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const upper = until || null;
 
   const filtered = p
-    .filter((r) => r.recorded_at >= cutoff)
+    .filter((r) => r.recorded_at >= cutoff && (!upper || r.recorded_at <= upper))
     .slice(-limit)
     .map((r) => ({
       pool_name: r.pool_name,
@@ -787,6 +790,8 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
 
   return {
     hours,
+    since: cutoff,
+    until: upper,
     count: filtered.length,
     total_pnl_usd: Math.round(totalPnl * 100) / 100,
     win_rate_pct: filtered.length > 0 ? Math.round((wins / filtered.length) * 100) : null,
