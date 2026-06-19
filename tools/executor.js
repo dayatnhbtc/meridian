@@ -616,11 +616,131 @@ const PROTECTED_TOOLS = new Set([
   "self_update",
 ]);
 
+const AUTO_SWAP_MIN_USD = 0.10;
+const AUTO_SWAP_BALANCE_EPSILON = 1e-12;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tokenUsd(token) {
+  const value = Number(token?.usd ?? token?.usd_value ?? token?.usdValue ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function tokenBalance(token) {
+  const value = Number(token?.balance ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function indexedTokenBalances(balances) {
+  const out = new Map();
+  for (const token of balances?.tokens || []) {
+    if (!token?.mint || token.mint === config.tokens.SOL) continue;
+    out.set(token.mint, tokenBalance(token));
+  }
+  return out;
+}
+
+function eligibleCloseSwapTokens({ balances, preTokenBalances, baseMint, minUsd = AUTO_SWAP_MIN_USD }) {
+  const tokens = balances?.tokens || [];
+  const byMint = new Map(tokens.filter((token) => token?.mint).map((token) => [token.mint, token]));
+  const selected = new Map();
+
+  if (baseMint && byMint.has(baseMint)) {
+    const token = byMint.get(baseMint);
+    if (tokenUsd(token) >= minUsd && tokenBalance(token) > 0) selected.set(baseMint, token);
+  }
+
+  for (const token of tokens) {
+    if (!token?.mint || token.mint === config.tokens.SOL) continue;
+    if (tokenUsd(token) < minUsd || tokenBalance(token) <= 0) continue;
+    const previous = preTokenBalances?.get(token.mint) ?? 0;
+    if (tokenBalance(token) > previous + AUTO_SWAP_BALANCE_EPSILON) {
+      selected.set(token.mint, token);
+    }
+  }
+
+  return [...selected.values()];
+}
+
+async function autoSwapCloseProceedsToSol({ result, args, preBalances }) {
+  result.auto_swap_attempted = !args.skip_swap;
+  result.auto_swapped = false;
+  result.auto_swap_txs = [];
+  result.auto_swap_errors = [];
+  result.leftover_tokens = [];
+
+  if (args.skip_swap) {
+    result.auto_swap_skipped = "skip_swap requested";
+    return result;
+  }
+
+  const preTokenBalances = indexedTokenBalances(preBalances);
+  let balances = null;
+  let candidates = [];
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    balances = await getWalletBalances({});
+    candidates = eligibleCloseSwapTokens({
+      balances,
+      preTokenBalances,
+      baseMint: result.base_mint,
+    });
+    if (candidates.length > 0) break;
+    if (attempt < 3) await sleep(2000);
+  }
+
+  for (const token of candidates) {
+    try {
+      log("executor", `Auto-swapping ${token.symbol || token.mint.slice(0, 8)} ($${tokenUsd(token).toFixed(2)}) back to SOL`);
+      const swapResult = await swapToken({ input_mint: token.mint, output_mint: "SOL", amount: tokenBalance(token) });
+      if (swapResult?.success && swapResult.tx) {
+        result.auto_swapped = true;
+        result.auto_swap_txs.push(swapResult.tx);
+        if (swapResult?.amount_out) result.sol_received = (Number(result.sol_received) || 0) + Number(swapResult.amount_out);
+      } else {
+        const error = swapResult?.error || "swap returned no success tx";
+        result.auto_swap_errors.push({ mint: token.mint, symbol: token.symbol || null, error });
+        log("executor_warn", `Auto-swap after close failed for ${token.symbol || token.mint.slice(0, 8)}: ${error}`);
+      }
+    } catch (e) {
+      result.auto_swap_errors.push({ mint: token.mint, symbol: token.symbol || null, error: e.message });
+      log("executor_warn", `Auto-swap after close failed for ${token.symbol || token.mint.slice(0, 8)}: ${e.message}`);
+    }
+  }
+
+  const finalBalances = await getWalletBalances({}).catch(() => null);
+  const finalTokens = finalBalances?.tokens || [];
+  result.leftover_tokens = finalTokens
+    .filter((token) => {
+      if (!token?.mint || token.mint === config.tokens.SOL || tokenUsd(token) < AUTO_SWAP_MIN_USD) return false;
+      if (result.base_mint && token.mint === result.base_mint) return true;
+      const previous = preTokenBalances.get(token.mint) ?? 0;
+      return tokenBalance(token) > previous + AUTO_SWAP_BALANCE_EPSILON;
+    })
+    .map((token) => ({
+      mint: token.mint,
+      symbol: token.symbol || token.mint.slice(0, 8),
+      balance: tokenBalance(token),
+      usd: tokenUsd(token),
+    }));
+
+  if (result.auto_swapped) {
+    result.auto_swap_note = `Auto-swapped close proceeds back to SOL (${result.auto_swap_txs.length} tx${result.auto_swap_txs.length === 1 ? "" : "s"}).`;
+  } else if (!candidates.length) {
+    result.auto_swap_note = `No close proceeds above $${AUTO_SWAP_MIN_USD.toFixed(2)} found to auto-swap.`;
+  }
+
+  return result;
+}
+
 /**
  * Execute a tool call with safety checks and logging.
  */
 export async function executeTool(name, args) {
   const startTime = Date.now();
+  args = args || {};
 
   // Strip model artifacts like "<|channel|>commentary" appended to tool names
   name = name.replace(/<.*$/, "").trim();
@@ -648,6 +768,9 @@ export async function executeTool(name, args) {
 
   // ─── Execute ──────────────────────────────
   try {
+    const preCloseBalances = name === "close_position" && !args.skip_swap
+      ? await getWalletBalances({}).catch(() => null)
+      : null;
     const result = await fn(args);
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
@@ -672,23 +795,8 @@ export async function executeTool(name, args) {
           const poolAddr = result.pool || args.pool_address;
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
-        // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
-          try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
-            }
-          } catch (e) {
-            log("executor_warn", `Auto-swap after close failed: ${e.message}`);
-          }
-        }
+        // Auto-swap close proceeds back to SOL unless user explicitly asked to hold.
+        await autoSwapCloseProceedsToSol({ result, args, preBalances: preCloseBalances });
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
           const balances = await getWalletBalances({});

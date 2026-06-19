@@ -64,11 +64,12 @@ function rangeStatus(position) {
   return `🟢 IN ${rangePositionPct(position)}%`;
 }
 
-function signedMoney(value, { digits = 2 } = {}) {
+function signedMoney(value, { solMode = false, digits = 2 } = {}) {
+  const prefix = solMode ? "◎" : "$";
   const n = Number(value);
-  if (!Number.isFinite(n)) return "$?";
+  if (!Number.isFinite(n)) return `${prefix}?`;
   const sign = n >= 0 ? "+" : "-";
-  return `${sign}$${Math.abs(n).toFixed(digits)}`;
+  return `${sign}${prefix}${Math.abs(n).toFixed(digits)}`;
 }
 
 function signedPct(value, digits = 2) {
@@ -111,11 +112,11 @@ function rangeBar(position, width = 22) {
 
 export function formatPositionLine(position, action = {}, options = {}) {
   const inRange = rangeStatus(position);
-  const pnlUsd = openPnlUsd(position);
+  const pnlValue = openPnlValue(position, options);
   const valueOpts = { ...options, digits: options.solMode ? 4 : 2 };
   const lines = [
     `<b>${escapeHtml(position.pair || position.pool || "Unknown")}</b>  ${inRange}  ${actionBadge(action)}`,
-    `Val: ${money(position.total_value_usd, valueOpts)}  PnL: ${signedMoney(pnlUsd)} (${signedPct(openPnlPct(position))})`,
+    `Val: ${money(position.total_value_usd, valueOpts)}  PnL: ${signedMoney(pnlValue, valueOpts)} (${signedPct(openPnlPct(position))})`,
     `Fees: ${money(position.unclaimed_fees_usd, valueOpts)}  Yield: ${pct(position.fee_per_tvl_24h)}  Age: ${formatAge(position.age_minutes)}`,
   ];
   const bar = rangeBar(position);
@@ -139,7 +140,7 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
 
   const totalValue = positions.reduce((s, p) => s + (Number(p.total_value_usd) || 0), 0);
   const totalFees = positions.reduce((s, p) => s + (Number(p.unclaimed_fees_usd) || 0), 0);
-  const totalPnl = positions.reduce((s, p) => s + openPnlUsd(p), 0);
+  const totalPnl = positions.reduce((s, p) => s + openPnlValue(p, { solMode }), 0);
   const inRangeCount = positions.filter((p) => p.in_range).length;
   const avgRangePosition = (() => {
     const values = positions.filter((p) => p.in_range).map(rangePositionPct).filter((value) => value != null);
@@ -166,7 +167,7 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
     `<b>${escapeHtml(title)}</b>`,
     `Positions: ${slots}  Range: ${inRangeCount}/${positions.length} IN${avgRangePosition == null ? "" : ` (avg ${avgRangePosition}%)`}`,
     `Actions: ${actionBits}`,
-    `Value: ${money(totalValue, valueOpts)}  PnL: ${signedMoney(totalPnl)}  Fees: ${money(totalFees, valueOpts)}`,
+    `Value: ${money(totalValue, valueOpts)}  PnL: ${signedMoney(totalPnl, valueOpts)}  Fees: ${money(totalFees, valueOpts)}`,
     "",
     body,
     "",
@@ -241,11 +242,17 @@ function firstFinite(...values) {
   return null;
 }
 
-function openPnlUsd(position) {
+function openPnlValue(position, { solMode = false } = {}) {
+  // A suspicious tick has no reliable cost basis (deposit history missing /
+  // unpriced), so its pnl can be the full position value — exclude it from
+  // totals rather than reporting a phantom profit.
+  if (position?.pnl_pct_suspicious) return 0;
+  if (solMode) return firstFinite(position?.pnl_usd) ?? 0;
   return firstFinite(position?.pnl_true_usd, position?.pnl_usd) ?? 0;
 }
 
-function openFeesUsd(position) {
+function openFeesValue(position, { solMode = false } = {}) {
+  if (solMode) return firstFinite(position?.unclaimed_fees_usd) ?? 0;
   return firstFinite(position?.unclaimed_fees_true_usd, position?.unclaimed_fees_usd) ?? 0;
 }
 
@@ -257,20 +264,52 @@ function openPnlPct(position) {
   return reported ?? derived;
 }
 
-export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPositions = [], compact = false, title = "PnL Hari Ini" } = {}) {
+function hasFinite(value) {
+  return Number.isFinite(Number(value));
+}
+
+function realizedSolValue(position) {
+  return hasFinite(position?.pnl_sol) ? Number(position.pnl_sol) : null;
+}
+
+function realizedSolPct(position) {
+  return hasFinite(position?.pnl_sol_pct) ? Number(position.pnl_sol_pct) : null;
+}
+
+export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPositions = [], compact = false, title = "PnL Hari Ini", solMode = false } = {}) {
   const realizedPnl = sum(realizedPositions, "pnl_usd");
   const realizedFees = sum(realizedPositions, "fees_earned_usd");
-  const openPnl = openPositions.reduce((total, position) => total + openPnlUsd(position), 0);
-  const openFees = openPositions.reduce((total, position) => total + openFeesUsd(position), 0);
-  const totalPnl = realizedPnl + openPnl;
+  const realizedWithSol = realizedPositions.filter((position) => realizedSolValue(position) != null);
+  const realizedSolPnl = realizedWithSol.reduce((total, position) => total + realizedSolValue(position), 0);
+  const openPnl = openPositions.reduce((total, position) => total + openPnlValue(position, { solMode }), 0);
+  const openFees = openPositions.reduce((total, position) => total + openFeesValue(position, { solMode }), 0);
+  const canTotalSol = solMode && realizedWithSol.length === realizedPositions.length;
+  const totalPnl = solMode ? (canTotalSol ? realizedSolPnl + openPnl : null) : realizedPnl + openPnl;
+  const valueOpts = { solMode, digits: solMode ? 4 : 2 };
+  const usdOpts = { digits: 2 };
+
+  const realizedLine = (() => {
+    if (!solMode) {
+      return `${pnlEmoji(realizedPnl)} Realized: <b>${signedMoney(realizedPnl, usdOpts)}</b> (${realizedPositions.length} closed)` + (realizedPositions.length ? `  Fees: ${money(realizedFees, { digits: 2 })}` : "");
+    }
+    if (!realizedPositions.length) return `⚪ Realized: <b>${signedMoney(0, valueOpts)}</b> (0 closed)`;
+    if (canTotalSol) {
+      return `${pnlEmoji(realizedSolPnl)} Realized: <b>${signedMoney(realizedSolPnl, valueOpts)}</b> (${realizedPositions.length} closed)  USD ref: ${signedMoney(realizedPnl, usdOpts)}`;
+    }
+    return `${pnlEmoji(realizedPnl)} Realized: <b>${signedMoney(realizedPnl, usdOpts)}</b> (${realizedPositions.length} closed, USD history)` + (realizedWithSol.length ? `  SOL-covered: ${signedMoney(realizedSolPnl, valueOpts)} (${realizedWithSol.length})` : "");
+  })();
+
+  const totalLine = totalPnl != null
+    ? `${pnlEmoji(totalPnl)} <b>Total: ${signedMoney(totalPnl, valueOpts)}</b>`
+    : `⚪ <b>Total: mixed units</b> (Open ${signedMoney(openPnl, valueOpts)} + Realized ${signedMoney(realizedPnl, usdOpts)})`;
 
   const lines = [
     `📊 <b>${escapeHtml(title)}</b>`,
     dateLabel ? escapeHtml(dateLabel) : null,
     "",
-    `${pnlEmoji(realizedPnl)} Realized: <b>${signedMoney(realizedPnl)}</b> (${realizedPositions.length} closed)` + (realizedPositions.length ? `  Fees: ${money(realizedFees, { digits: 2 })}` : ""),
-    `${pnlEmoji(openPnl)} Open: <b>${signedMoney(openPnl)}</b> (${openPositions.length} open)` + (openPositions.length ? `  Fees: ${money(openFees, { digits: 2 })}` : ""),
-    `${pnlEmoji(totalPnl)} <b>Total: ${signedMoney(totalPnl)}</b>`,
+    realizedLine,
+    `${pnlEmoji(openPnl)} Open: <b>${signedMoney(openPnl, valueOpts)}</b> (${openPositions.length} open)` + (openPositions.length ? `  Fees: ${money(openFees, valueOpts)}` : ""),
+    totalLine,
   ].filter((line) => line !== null && line !== undefined);
 
   if (compact) {
@@ -285,15 +324,19 @@ export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPo
       return bt - at;
     });
     for (const p of latestRealized.slice(0, 8)) {
-      lines.push(`${pnlEmoji(p.pnl_usd)} ${escapeHtml(p.pool_name || p.pair || p.pool || "Unknown")}  <b>${signedMoney(p.pnl_usd)}</b>  ${signedPct(p.pnl_pct)}`);
+      const solValue = solMode ? realizedSolValue(p) : null;
+      const value = solValue ?? Number(p.pnl_usd);
+      const opts = solValue != null ? valueOpts : usdOpts;
+      const pctValue = solValue != null ? realizedSolPct(p) : p.pnl_pct;
+      lines.push(`${pnlEmoji(value)} ${escapeHtml(p.pool_name || p.pair || p.pool || "Unknown")}  <b>${signedMoney(value, opts)}</b>  ${signedPct(pctValue)}`);
     }
   }
 
   if (openPositions.length) {
     lines.push("", "📗 <b>Open now</b>");
     for (const p of openPositions.slice(0, 8)) {
-      const pnlUsd = openPnlUsd(p);
-      lines.push(`${pnlEmoji(pnlUsd)} ${escapeHtml(p.pair || p.pool || "Unknown")}  <b>${signedMoney(pnlUsd)}</b>  ${signedPct(openPnlPct(p))}`);
+      const pnlValue = openPnlValue(p, { solMode });
+      lines.push(`${pnlEmoji(pnlValue)} ${escapeHtml(p.pair || p.pool || "Unknown")}  <b>${signedMoney(pnlValue, valueOpts)}</b>  ${signedPct(openPnlPct(p))}`);
     }
   }
 

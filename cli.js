@@ -95,6 +95,12 @@ Swaps tokens via Jupiter. Use "SOL" as mint shorthand.
 Output: { success, tx, input_amount, output_amount }
 \`\`\`
 
+### meridian sweep-tokens [--min-usd 0.10] [--dry-run]
+Swaps all non-SOL wallet tokens above the minimum USD value back to SOL.
+\`\`\`
+Output: { success, min_usd, swept, skipped }
+\`\`\`
+
 ### meridian candidates [--limit 5]
 Returns top pool candidates fully enriched: pool metrics, token audit, holders, smart wallets, narrative, active bin, pool memory.
 \`\`\`
@@ -252,6 +258,7 @@ const { values: flags } = parseArgs({
     "skip-swap":  { type: "boolean" },
     "dry-run":    { type: "boolean" },
     "silent":     { type: "boolean" },
+    "min-usd":     { type: "string" },
     limit:        { type: "string" },
   },
   allowPositionals: true,
@@ -478,6 +485,45 @@ switch (subcommand) {
       output_mint: flags.to,
       amount: parseFloat(flags.amount),
     }));
+    break;
+  }
+
+  // ── sweep-tokens ────────────────────────────────────────────────
+  case "sweep-tokens": {
+    const minUsd = flags["min-usd"] == null ? 0.10 : Number(flags["min-usd"]);
+    if (!Number.isFinite(minUsd) || minUsd < 0) die("Usage: meridian sweep-tokens [--min-usd 0.10]");
+    const { getWalletBalances } = await import("./tools/wallet.js");
+    const { config } = await import("./config.js");
+    const { executeTool } = await import("./tools/executor.js");
+    const balances = await getWalletBalances({});
+    const tokens = (balances.tokens || [])
+      .filter((token) => token?.mint && token.mint !== config.tokens.SOL)
+      .filter((token) => Number(token.usd || 0) >= minUsd && Number(token.balance || 0) > 0);
+    const swept = [];
+    const skipped = [];
+    for (const token of tokens) {
+      const result = await executeTool("swap_token", {
+        input_mint: token.mint,
+        output_mint: "SOL",
+        amount: Number(token.balance),
+      });
+      if (result?.success && result.tx) {
+        swept.push({
+          mint: token.mint,
+          symbol: token.symbol || token.mint.slice(0, 8),
+          usd: Number(token.usd || 0),
+          tx: result.tx,
+        });
+      } else {
+        skipped.push({
+          mint: token.mint,
+          symbol: token.symbol || token.mint.slice(0, 8),
+          usd: Number(token.usd || 0),
+          reason: result?.error || result?.reason || "swap failed",
+        });
+      }
+    }
+    out({ success: skipped.length === 0, min_usd: minUsd, swept, skipped });
     break;
   }
 

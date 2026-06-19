@@ -2,6 +2,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { getTrackedPosition } from "./state.js";
+import { config } from "./config.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const OFFSET_PATH = repoPath(".telegram-offset");
@@ -620,13 +621,11 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlUsdPct, pnlSolPct, 
     tracked = getTrackedPosition(positionAddress);
   }
 
-  const solMode = !!tracked?.amount_sol;
+  const solMode = !!config.management?.solMode;
   const netSol = (pnlSol ?? 0);
   const netUsdRaw = (pnlUsd ?? 0);
   const feesUsd = tracked?.total_fees_claimed_usd ?? 0;
   const netUsdTotal = netUsdRaw + feesUsd;
-  const netSign = netUsdRaw >= 0 ? "+" : "";
-  const netLabel = netUsdRaw >= 0 ? "✅" : "❌";
   const netTotalSign = netUsdTotal >= 0 ? "+" : "";
   const netTotalLabel = netUsdTotal >= 0 ? "✅" : "❌";
 
@@ -669,17 +668,23 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlUsdPct, pnlSolPct, 
   if (tracked?.fee_tvl_ratio != null) metaParts.push(`fee/TVL = ${tracked.fee_tvl_ratio}%`);
   const metaStr = metaParts.length > 0 ? `📊 Meta : ${metaParts.join(" | ")}` : "";
 
-  const icon = netSol >= 0 ? "🟢" : "🔴";
+  const primaryValue = solMode ? netSol : netUsdRaw;
+  const icon = primaryValue >= 0 ? "🟢" : "🔴";
 
   const lines = [
     `${icon} <b>CLOSED</b> | ${escapeHtml(pair)}`,
-    `◎ ${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}`,
-    `💵 ${usdSign}$${(pnlUsd ?? 0).toFixed(2)} (${usdSign}${(pnlUsdPct ?? 0).toFixed(2)}%) ${usdLabel}`,
-    `💰 Net : ${netTotalSign}$${netUsdTotal.toFixed(2)} ${netTotalLabel}`,
   ];
+  if (solMode) {
+    lines.push(`Closed PnL: ◎${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}`);
+    lines.push(`USD ref: ${usdSign}$${(pnlUsd ?? 0).toFixed(2)} (${usdSign}${(pnlUsdPct ?? 0).toFixed(2)}%) ${usdLabel}`);
+  } else {
+    lines.push(`Closed PnL: ${usdSign}$${(pnlUsd ?? 0).toFixed(2)} (${usdSign}${(pnlUsdPct ?? 0).toFixed(2)}%) ${usdLabel}`);
+    lines.push(`SOL ref: ◎${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}`);
+    lines.push(`💰 Net : ${netTotalSign}$${netUsdTotal.toFixed(2)} ${netTotalLabel}`);
+  }
   // Fees if any
   if (tracked?.total_fees_claimed_usd > 0) {
-    lines.splice(3, 0, `💸 Fees : $${tracked.total_fees_claimed_usd.toFixed(2)}`);
+    lines.push(`💸 Fees USD ref : $${tracked.total_fees_claimed_usd.toFixed(2)}`);
   }
   lines.push(`🤖 Exit : ${exitLabel}`);
   lines.push(`⏱️ Duration : ${durationStr}${inRangeStr ? ` | ${inRangeStr}` : ""}`);

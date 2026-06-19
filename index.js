@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log, logScreeningSnapshot } from "./logger.js";
-import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
+import { getMyPositions, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, getPoolDetail, pushFilteredReason } from "./tools/screening.js";
 import { formatPortfolioReport, formatDailyPnlReport } from "./report-format.js";
@@ -1217,10 +1217,11 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (confirmedTakeProfitReason) {
     return { action: "CLOSE", rule: 2, reason: confirmedTakeProfitReason, confirmed_recheck: true };
   }
+  const hardTakeProfitEnabled = !managementConfig.trailingTakeProfit;
   const strategyName = position.strategy || tracked?.strategy;
-  const strategyTakeProfitPct = getTakeProfitPctForLpStrategy(strategyName);
+  const strategyTakeProfitPct = hardTakeProfitEnabled ? getTakeProfitPctForLpStrategy(strategyName) : null;
   const takeProfitPct = strategyTakeProfitPct ?? managementConfig.takeProfitPct;
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= takeProfitPct) {
+  if (hardTakeProfitEnabled && !pnlSuspect && position.pnl_pct != null && position.pnl_pct >= takeProfitPct) {
     const strategyLabel = strategyName ? ` (${strategyName})` : "";
     const reason = formatCloseReason("TP", `PnL ${Number(position.pnl_pct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`);
     return { action: "CLOSE", rule: 2, reason, needs_confirmation: shouldUsePnlRecheck(), take_profit_pnl_pct: Number(position.pnl_pct) };
@@ -1320,7 +1321,7 @@ function formatConfigSnapshot() {
     "",
     `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
+    `Stop loss: ${config.management.stopLossPct}% | hard take profit: ${config.management.trailingTakeProfit ? "disabled (trailing TP on)" : `${config.management.takeProfitPct}%`}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
@@ -1410,7 +1411,7 @@ function renderSettingsMenu(page = "main") {
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
     `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
+    `TP/SL: ${config.management.trailingTakeProfit ? "hard TP off" : `${config.management.takeProfitPct}%`} / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
     `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
 
@@ -1770,7 +1771,7 @@ async function telegramHandler(msg) {
       const { positions } = await getMyPositions({ force: true });
       const perf = getPerformanceHistory({ hours: 24 });
       const realizedPositions = perf?.positions || [];
-      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [], compact: true })).catch(() => {});
+      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [], compact: true, solMode: config.management.solMode })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1780,7 +1781,7 @@ async function telegramHandler(msg) {
       const { positions } = await getMyPositions({ force: true });
       const perf = getPerformanceHistory({ hours: 24 });
       const realizedPositions = perf?.positions || [];
-      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [] })).catch(() => {});
+      await sendHTML(formatDailyPnlReport({ realizedPositions, openPositions: positions || [], solMode: config.management.solMode })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1848,7 +1849,9 @@ async function telegramHandler(msg) {
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const pnl = p.pnl_pct_suspicious
+          ? "?"
+          : p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
         const oor = !p.in_range ? " ⚠️OOR" : "";
         return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
@@ -1889,11 +1892,22 @@ async function telegramHandler(msg) {
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       await sendMessage(`Closing ${pos.pair}...`);
-      const result = await closePosition({ position_address: pos.position });
+      const result = await executeTool("close_position", { position_address: pos.position, reason: "Manual Telegram close" });
       if (result.success) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
         const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        const swapNote = result.auto_swapped
+          ? `\nAuto-swap txs: ${result.auto_swap_txs?.join(", ") || "n/a"}`
+          : result.auto_swap_errors?.length
+            ? `\nAuto-swap failed: ${result.auto_swap_errors.map((e) => e.error).join("; ")}`
+            : result.auto_swap_note ? `\n${result.auto_swap_note}` : "";
+        const leftovers = result.leftover_tokens?.length
+          ? `\nLeftover tokens: ${result.leftover_tokens.map((t) => `${t.symbol} $${t.usd}`).join(", ")}`
+          : "";
+        const closePnlValue = config.management.solMode && result.pnl_sol != null ? result.pnl_sol : result.pnl_usd;
+        const closePnlPrefix = config.management.solMode && result.pnl_sol != null ? "◎" : "$";
+        const closePnlPct = config.management.solMode && result.pnl_sol_pct != null ? result.pnl_sol_pct : result.pnl_pct;
+        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${closePnlPrefix}${closePnlValue ?? "?"}${closePnlPct != null ? ` (${closePnlPct}%)` : ""} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}${swapNote}${leftovers}`);
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
@@ -1909,8 +1923,13 @@ async function telegramHandler(msg) {
       const results = [];
       for (const pos of positions) {
         try {
-          const result = await closePosition({ position_address: pos.position });
-          results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
+          const result = await executeTool("close_position", { position_address: pos.position, reason: "Manual Telegram close all" });
+          const swap = result.auto_swapped
+            ? `, swapped ${result.auto_swap_txs?.length || 0}`
+            : result.auto_swap_errors?.length
+              ? ", auto-swap failed"
+              : "";
+          results.push(`${pos.pair}: ${result.success ? `closed${swap}` : `failed (${result.error || "unknown"})`}`);
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }

@@ -79,6 +79,18 @@ function buildSignalSnapshot(perf) {
   return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
 }
 
+function finiteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function roundTo(value, digits = 2) {
+  const n = finiteNumber(value);
+  if (n == null) return null;
+  const f = 10 ** digits;
+  return Math.round(n * f) / f;
+}
+
 // ─── Record Position Performance ──────────────────────────────
 
 /**
@@ -144,11 +156,23 @@ export async function recordPerformance(perf) {
   }
 
   const signalSnapshot = buildSignalSnapshot(perf);
+  const pnlSol = roundTo(perf.pnl_sol, 6);
+  const pnlSolPct = roundTo(perf.pnl_sol_pct, 2);
+  const pnlUsdPct = roundTo(perf.pnl_usd_pct, 2) ?? Math.round(pnl_pct * 100) / 100;
+  const solPriceAtClose = roundTo(
+    perf.sol_price_at_close ??
+      (pnlSol && Math.abs(pnlSol) > 1e-12 ? pnl_usd / pnlSol : null),
+    4,
+  );
   const entry = {
     ...perf,
     close_reason: closeReason,
     signal_snapshot: signalSnapshot,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
+    pnl_usd_pct: pnlUsdPct,
+    ...(pnlSol != null ? { pnl_sol: pnlSol } : {}),
+    ...(pnlSolPct != null ? { pnl_sol_pct: pnlSolPct } : {}),
+    ...(solPriceAtClose != null ? { sol_price_at_close: solPriceAtClose } : {}),
     pnl_pct: Math.round(pnl_pct * 100) / 100,
     range_efficiency: Math.round(range_efficiency * 10) / 10,
     recorded_at: new Date().toISOString(),

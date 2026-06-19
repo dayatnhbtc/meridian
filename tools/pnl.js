@@ -185,6 +185,7 @@ function resolvePairName(f, prices, meteora, tracked) {
 
 // ─── Build the shaped position object (matches getMyPositions output) ──
 function buildPosition(f, prices, solUsd, meteora, solMode) {
+  const tracked = getTrackedPosition(f.position);
   const priceX = f.baseMint ? (prices[f.baseMint] ?? 0) : 0;
 
   const xHuman = safeNum(f.xRaw) / 10 ** f.decX;
@@ -197,8 +198,17 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   const claimableUsd = feeXHuman * priceX + feeYHuman * (solUsd ?? 0);
   const claimableSol = solUsd ? claimableUsd / solUsd : feeYHuman;
 
-  const depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
-  const depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
+  // Cost basis from Meteora's deposit history. When a position is brand-new the
+  // indexer hasn't recorded the deposit yet, so allTimeDeposits is 0 — without a
+  // cost basis pnl = (current value + fees), i.e. the ENTIRE position value reads
+  // as profit (the +$75 phantom). Fall back to the tracked SOL deploy amount so a
+  // fresh position shows ~0 pnl instead of its full notional. Single-sided SOL
+  // entries make this a close approximation; it's corrected once the API indexes.
+  const trackedSol = safeNum(tracked?.amount_sol);
+  let depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
+  let depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
+  if (depositsSol <= 0 && trackedSol > 0) depositsSol = trackedSol;
+  if (depositsUsd <= 0 && trackedSol > 0 && solUsd > 0) depositsUsd = trackedSol * solUsd;
   const withdrawUsd = safeNum(meteora?.allTimeWithdrawals?.total?.usd);
   const withdrawSol = safeNum(meteora?.allTimeWithdrawals?.total?.sol);
   const claimedUsd = safeNum(meteora?.allTimeFees?.total?.usd);
@@ -238,7 +248,6 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   if (inRange) markInRange(f.position);
   else markOutOfRange(f.position);
 
-  const tracked = getTrackedPosition(f.position);
   const ageFromState = tracked?.deployed_at
     ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
     : null;
