@@ -1763,6 +1763,13 @@ export async function closePosition({ position_address, reason }) {
           minutes_in_range: Math.max(0, minutesHeld - totalMinutesOutOfRange(position_address)),
           minutes_held: minutesHeld,
           close_reason: closeReason,
+          // Trailing-TP tuning analysis: peak high-water mark vs final PnL lets us
+          // later measure give-back (peak - pnl_pct) and judge whether trailingDropPct
+          // is too wide (gives back too much) or too tight (exits on noise).
+          peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+          trailing_active_at_close: tracked.trailing_active ?? false,
+          trailing_trigger_pct_at_close: config.management.trailingTriggerPct,
+          trailing_drop_pct_at_close: config.management.trailingDropPct,
           signal_snapshot: signalSnapshot,
           entry_mcap: tracked.entry_mcap ?? null,
           entry_tvl: tracked.entry_tvl ?? null,
@@ -2108,6 +2115,13 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: Math.max(0, minutesHeld - totalMinutesOutOfRange(position_address)),
         minutes_held: minutesHeld,
         close_reason: closeReason,
+        // Trailing-TP tuning analysis: peak high-water mark vs final PnL lets us
+        // later measure give-back (peak - pnl_pct) and judge whether trailingDropPct
+        // is too wide (gives back too much) or too tight (exits on noise).
+        peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+        trailing_active_at_close: tracked.trailing_active ?? false,
+        trailing_trigger_pct_at_close: config.management.trailingTriggerPct,
+        trailing_drop_pct_at_close: config.management.trailingDropPct,
         signal_snapshot: signalSnapshot,
         entry_mcap: tracked.entry_mcap ?? null,
         entry_tvl: tracked.entry_tvl ?? null,
