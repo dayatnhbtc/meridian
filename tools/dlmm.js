@@ -1109,6 +1109,30 @@ function getClosedPnlPct(posEntry, solMode = false) {
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
 }
 
+function isBrokenClosedSolPnl(posEntry) {
+  const depositSol = maybeNum(posEntry?.allTimeDeposits?.total?.sol);
+  const withdrawSol = maybeNum(posEntry?.allTimeWithdrawals?.total?.sol) ?? 0;
+  const feeSol = maybeNum(posEntry?.allTimeFees?.total?.sol) ?? 0;
+  const withdrawUsd = maybeNum(posEntry?.allTimeWithdrawals?.total?.usd) ?? 0;
+  const pnlSol = maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative);
+  const pnlSolPct = maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative);
+  const pnlUsdPct = maybeNum(posEntry?.pnlPctChange) ?? maybeNum(posEntry?.pnl?.percent);
+  if (!(depositSol > 0) || pnlSol == null) return false;
+  const fullDepositLoss = Math.abs(pnlSol + depositSol) <= Math.max(1e-6, depositSol * 0.001);
+  return fullDepositLoss &&
+    pnlSolPct != null && pnlSolPct <= -99 &&
+    withdrawSol <= 0 && feeSol <= 0 &&
+    withdrawUsd > 0 &&
+    (pnlUsdPct == null || pnlUsdPct > -50);
+}
+
+function reliableClosedSolPnl(posEntry) {
+  if (isBrokenClosedSolPnl(posEntry)) return { value: null, pct: null, unreliable: true };
+  const value = maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative);
+  const pct = maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative) ?? (value != null ? getClosedPnlPct(posEntry, true) : null);
+  return { value, pct, unreliable: false };
+}
+
 function deriveOpenPnlPct(binData, solMode = false) {
   if (!binData) return null;
 
@@ -1671,12 +1695,13 @@ export async function closePosition({ position_address, reason }) {
               const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
               if (posEntry) {
                 pnlTrueUsd = safeNum(posEntry.pnlUsd);
-                pnlSol = maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative);
-                pnlSolPct = maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative) ?? (pnlSol != null ? getClosedPnlPct(posEntry, true) : null);
+                const reliableSol = reliableClosedSolPnl(posEntry);
+                pnlSol = reliableSol.value;
+                pnlSolPct = reliableSol.pct;
                 pnlUsdAlways = pnlTrueUsd;
                 pnlUsdAlwaysPct = getClosedPnlPct(posEntry, false);
                 pnlUsd = config.management.solMode ? (pnlSol ?? 0) : pnlUsdAlways;
-                pnlPct = config.management.solMode ? (pnlSolPct ?? 0) : pnlUsdAlwaysPct;
+                pnlPct = config.management.solMode && pnlSolPct != null ? pnlSolPct : pnlUsdAlwaysPct;
                 finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
                 const finalValueSol = parseFloat(posEntry.allTimeWithdrawals?.total?.sol || 0);
                 solPriceAtClose = finalValueSol > 0 ? finalValueUsd / finalValueSol : (pnlSol != null && Math.abs(pnlSol) > 1e-12 ? pnlUsdAlways / pnlSol : null);
@@ -1972,8 +1997,9 @@ export async function closePosition({ position_address, reason }) {
             const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
             if (posEntry) {
               const nextPnlUsd = safeNum(posEntry.pnlUsd);
-              const nextPnlValue = config.management.solMode ? getClosedPnlValue(posEntry, true) : nextPnlUsd;
-              const nextPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
+              const reliableSol = reliableClosedSolPnl(posEntry);
+              const nextPnlValue = config.management.solMode && reliableSol.value != null ? reliableSol.value : nextPnlUsd;
+              const nextPnlPct = config.management.solMode && reliableSol.pct != null ? reliableSol.pct : getClosedPnlPct(posEntry, false);
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
               const nextFinalValueSol = parseFloat(posEntry.allTimeWithdrawals?.total?.sol || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
@@ -1988,10 +2014,12 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
-                pnlSol = maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative);
-                pnlSolPct = maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative) ?? (pnlSol != null ? getClosedPnlPct(posEntry, true) : null);
+                pnlSol = reliableSol.value;
+                pnlSolPct = reliableSol.pct;
                 pnlUsdAlways = nextPnlUsd;
                 pnlUsdAlwaysPct = getClosedPnlPct(posEntry, false);
+                pnlUsd = config.management.solMode ? (pnlSol ?? 0) : pnlUsdAlways;
+                pnlPct = config.management.solMode && pnlSolPct != null ? pnlSolPct : pnlUsdAlwaysPct;
                 solPriceAtClose = nextFinalValueSol > 0 ? nextFinalValueUsd / nextFinalValueSol : (pnlSol != null && Math.abs(pnlSol) > 1e-12 ? pnlUsdAlways / pnlSol : null);
 
                 log("close", `Closed PnL: sol=${(pnlSol ?? 0).toFixed(6)} SOL (${(pnlSolPct ?? 0).toFixed(2)}%), usd=${pnlUsdAlways.toFixed(2)} USD (${pnlUsdAlwaysPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
@@ -2124,7 +2152,7 @@ export async function closePosition({ position_address, reason }) {
         pnl_sol: pnlSol,
         pnl_usd_pct: pnlUsdAlwaysPct,
         pnl_sol_pct: pnlSolPct,
-        pnl_pct: config.management.solMode ? pnlSolPct : pnlUsdAlwaysPct,
+        pnl_pct: config.management.solMode && pnlSolPct != null ? pnlSolPct : pnlUsdAlwaysPct,
         base_mint: closeBaseMint,
         close_reason: closeReason,
       };

@@ -34,6 +34,17 @@ function round(value, digits = 4) {
   return Math.round(n * factor) / factor;
 }
 
+function brokenClosedSolPnl({ initialSol, finalSol, feesSol, finalUsd, pnlSol, pnlSolPct, pnlUsdPct }) {
+  if (!(initialSol > 0) || pnlSol == null) return false;
+  const fullDepositLoss = Math.abs(pnlSol + initialSol) <= Math.max(1e-6, initialSol * 0.001);
+  return fullDepositLoss &&
+    pnlSolPct != null && pnlSolPct <= -99 &&
+    (finalSol ?? 0) <= 0 &&
+    (feesSol ?? 0) <= 0 &&
+    (finalUsd ?? 0) > 0 &&
+    (pnlUsdPct == null || pnlUsdPct > -50);
+}
+
 function isoFromUnix(value) {
   const n = finite(value);
   if (n == null || n <= 0) return null;
@@ -121,6 +132,11 @@ function makeBackfillRecord({ pos, poolAddress, poolMeta, pnlMeta, existing, tra
   const pnlSol = finite(pos.pnlSol);
   const pnlUsdPct = finite(pos.pnlPctChange);
   const pnlSolPct = finite(pos.pnlSolPctChange);
+  const unreliableSol = brokenClosedSolPnl({ initialSol, finalSol, feesSol, finalUsd, pnlSol, pnlSolPct, pnlUsdPct });
+  const nextFinalSol = unreliableSol ? existing?.final_value_sol ?? null : finalSol;
+  const nextFeesSol = unreliableSol ? existing?.fees_earned_sol ?? null : feesSol;
+  const nextPnlSol = unreliableSol ? existing?.pnl_sol ?? null : pnlSol;
+  const nextPnlSolPct = unreliableSol ? existing?.pnl_sol_pct ?? null : pnlSolPct;
   const createdAt = isoFromUnix(pos.createdAt);
   const closedAt = isoFromUnix(pos.closedAt);
   const minutesHeld = createdAt && closedAt
@@ -141,16 +157,16 @@ function makeBackfillRecord({ pos, poolAddress, poolMeta, pnlMeta, existing, tra
     initial_value_usd: round(initialUsd, 6),
     initial_value_sol: round(initialSol, 9),
     final_value_usd: round(finalUsd, 6),
-    final_value_sol: round(finalSol, 9),
+    final_value_sol: round(nextFinalSol, 9),
     fees_earned_usd: round(feesUsd, 6),
-    fees_earned_sol: round(feesSol, 9),
+    fees_earned_sol: round(nextFeesSol, 9),
     fee_earned_pct: initialUsd && feesUsd != null ? round((feesUsd / initialUsd) * 100, 4) : existing?.fee_earned_pct ?? null,
     pnl_usd: round(pnlUsd, 4),
     pnl_usd_pct: round(pnlUsdPct, 4),
-    pnl_sol: round(pnlSol, 9),
-    pnl_sol_pct: round(pnlSolPct, 4),
+    pnl_sol: round(nextPnlSol, 9),
+    pnl_sol_pct: round(nextPnlSolPct, 4),
     pnl_pct: round(pnlUsdPct, 4),
-    sol_price_at_close: finalSol && finalUsd != null ? round(finalUsd / finalSol, 4) : existing?.sol_price_at_close ?? null,
+    sol_price_at_close: nextFinalSol && finalUsd != null ? round(finalUsd / nextFinalSol, 4) : existing?.sol_price_at_close ?? null,
     range_efficiency: existing?.range_efficiency ?? null,
     minutes_held: minutesHeld,
     close_reason: existing?.close_reason || (source === "wallet_manual" ? "[Manual] wallet history backfill" : "[Manual] Meteora history backfill"),
@@ -161,6 +177,7 @@ function makeBackfillRecord({ pos, poolAddress, poolMeta, pnlMeta, existing, tra
     recorded_at: existing?.recorded_at || closedAt || now,
     backfilled_from: "meteora",
     backfilled_at: now,
+    meteora_sol_unreliable: unreliableSol || existing?.meteora_sol_unreliable || false,
   };
 }
 
