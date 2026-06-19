@@ -227,8 +227,12 @@ Starts the autonomous agent with cron jobs (management + screening).
 --silent      Suppress Telegram notifications for this run
 `;
 
-fs.mkdirSync(meridianDir, { recursive: true });
-fs.writeFileSync(path.join(meridianDir, "SKILL.md"), SKILL_MD);
+try {
+  fs.mkdirSync(meridianDir, { recursive: true });
+  fs.writeFileSync(path.join(meridianDir, "SKILL.md"), SKILL_MD);
+} catch {
+  // CLI commands should still work in restricted/read-only home environments.
+}
 
 // ─── Parse args ───────────────────────────────────────────────────
 const argv = process.argv.slice(2);
