@@ -72,6 +72,15 @@ function signedMoney(value, { solMode = false, digits = 2 } = {}) {
   return `${sign}${prefix}${Math.abs(n).toFixed(digits)}`;
 }
 
+function signedIdrFromSol(solValue, idrPerSol) {
+  const sol = Number(solValue);
+  const rate = Number(idrPerSol);
+  if (!Number.isFinite(sol) || !Number.isFinite(rate) || rate <= 0) return "";
+  const value = sol * rate;
+  const sign = value >= 0 ? "+" : "-";
+  return ` (${sign}Rp${Math.round(Math.abs(value)).toLocaleString("id-ID")})`;
+}
+
 function signedPct(value, digits = 2) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "?";
@@ -131,6 +140,7 @@ export function formatPositionLine(position, action = {}, options = {}) {
 
 export function formatPortfolioReport(positions = [], actionMap = new Map(), options = {}) {
   const solMode = Boolean(options.solMode);
+  const idrPerSol = Number(options.idrPerSol);
   const title = options.title || "Portfolio 💼";
   if (!positions.length) {
     return [options.intro ? escapeHtml(options.intro) : null, `${escapeHtml(title)} 0 positions`, options.actionSummary ? `<i>${escapeHtml(options.actionSummary)}</i>` : null]
@@ -167,7 +177,7 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
     `<b>${escapeHtml(title)}</b>`,
     `Positions: ${slots}  Range: ${inRangeCount}/${positions.length} IN${avgRangePosition == null ? "" : ` (avg ${avgRangePosition}%)`}`,
     `Actions: ${actionBits}`,
-    `Value: ${money(totalValue, valueOpts)}  PnL: ${signedMoney(totalPnl, valueOpts)}  Fees: ${money(totalFees, valueOpts)}`,
+    `Value: ${money(totalValue, valueOpts)}  PnL: ${signedMoney(totalPnl, valueOpts)}${solMode ? signedIdrFromSol(totalPnl, idrPerSol) : ""}  Fees: ${money(totalFees, valueOpts)}`,
     "",
     body,
     "",
@@ -276,7 +286,7 @@ function realizedSolPct(position) {
   return hasFinite(position?.pnl_sol_pct) ? Number(position.pnl_sol_pct) : null;
 }
 
-export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPositions = [], compact = false, title = "PnL Hari Ini", solMode = false } = {}) {
+export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPositions = [], compact = false, title = "PnL Hari Ini", solMode = false, idrPerSol = null } = {}) {
   const realizedPnl = sum(realizedPositions, "pnl_usd");
   const realizedFees = sum(realizedPositions, "fees_earned_usd");
   const realizedWithSol = realizedPositions.filter((position) => realizedSolValue(position) != null);
@@ -300,7 +310,7 @@ export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPo
   })();
 
   const totalLine = totalPnl != null
-    ? `${pnlEmoji(totalPnl)} <b>Total: ${signedMoney(totalPnl, valueOpts)}</b>`
+    ? `${pnlEmoji(totalPnl)} <b>Total: ${signedMoney(totalPnl, valueOpts)}${solMode ? signedIdrFromSol(totalPnl, idrPerSol) : ""}</b>`
     : `⚪ <b>Total: mixed units</b> (Open ${signedMoney(openPnl, valueOpts)} + Realized ${signedMoney(realizedPnl, usdOpts)})`;
 
   const lines = [

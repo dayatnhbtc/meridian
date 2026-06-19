@@ -7,6 +7,7 @@ import { agentLoop } from "./agent.js";
 import { log, logScreeningSnapshot } from "./logger.js";
 import { getMyPositions, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
+import { getIdrPerSol } from "./tools/fx.js";
 import { getTopCandidates, getPoolDetail, pushFilteredReason } from "./tools/screening.js";
 import { formatPortfolioReport, formatDailyPnlReport } from "./report-format.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
@@ -393,9 +394,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
+    const idrPerSol = config.management.solMode
+      ? await getIdrPerSol({ solUsd: deriveSolUsdFromPositions(positionData) }).catch(() => null)
+      : null;
     mgmtReport = formatPortfolioReport(positionData, actionMap, {
       title: "Portfolio 💼",
       solMode: config.management.solMode,
+      idrPerSol,
       maxPositions: config.risk.maxPositions,
       actionSummary,
     });
@@ -1428,6 +1433,32 @@ function getTodayPerformance() {
   };
 }
 
+function deriveSolUsdFromPositions(positions = []) {
+  const totals = positions.reduce((acc, position) => {
+    const solValue = Number(position.total_value_usd);
+    const usdValue = Number(position.total_value_true_usd);
+    if (Number.isFinite(solValue) && solValue > 0 && Number.isFinite(usdValue) && usdValue > 0) {
+      acc.sol += solValue;
+      acc.usd += usdValue;
+    }
+    return acc;
+  }, { sol: 0, usd: 0 });
+  return totals.sol > 0 && totals.usd > 0 ? totals.usd / totals.sol : null;
+}
+
+function deriveSolUsdFromPerformance(positions = []) {
+  const totals = positions.reduce((acc, position) => {
+    const solPnl = Number(position.pnl_sol);
+    const usdPnl = Number(position.pnl_usd);
+    if (Number.isFinite(solPnl) && Number.isFinite(usdPnl) && Math.abs(solPnl) > 1e-9 && Math.abs(usdPnl) > 0.01) {
+      acc.sol += Math.abs(solPnl);
+      acc.usd += Math.abs(usdPnl);
+    }
+    return acc;
+  }, { sol: 0, usd: 0 });
+  return totals.sol > 0 && totals.usd > 0 ? totals.usd / totals.sol : null;
+}
+
 function renderSettingsMenu(page = "main") {
   const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
   const summary = [
@@ -1795,7 +1826,10 @@ async function telegramHandler(msg) {
       const { positions } = await getMyPositions({ force: true });
       const { perf, dateLabel } = getTodayPerformance();
       const realizedPositions = perf?.positions || [];
-      await sendHTML(formatDailyPnlReport({ dateLabel, realizedPositions, openPositions: positions || [], compact: true, solMode: config.management.solMode })).catch(() => {});
+      const idrPerSol = config.management.solMode
+        ? await getIdrPerSol({ solUsd: deriveSolUsdFromPositions(positions || []) || deriveSolUsdFromPerformance(realizedPositions) }).catch(() => null)
+        : null;
+      await sendHTML(formatDailyPnlReport({ dateLabel, realizedPositions, openPositions: positions || [], compact: true, solMode: config.management.solMode, idrPerSol })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1805,7 +1839,10 @@ async function telegramHandler(msg) {
       const { positions } = await getMyPositions({ force: true });
       const { perf, dateLabel } = getTodayPerformance();
       const realizedPositions = perf?.positions || [];
-      await sendHTML(formatDailyPnlReport({ dateLabel, realizedPositions, openPositions: positions || [], solMode: config.management.solMode })).catch(() => {});
+      const idrPerSol = config.management.solMode
+        ? await getIdrPerSol({ solUsd: deriveSolUsdFromPositions(positions || []) || deriveSolUsdFromPerformance(realizedPositions) }).catch(() => null)
+        : null;
+      await sendHTML(formatDailyPnlReport({ dateLabel, realizedPositions, openPositions: positions || [], solMode: config.management.solMode, idrPerSol })).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
