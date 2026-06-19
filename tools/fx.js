@@ -1,27 +1,77 @@
+import fs from "fs";
 import { config } from "../config.js";
 import { log } from "../logger.js";
+import { repoPath } from "../repo-root.js";
 
-const USD_IDR_TTL_MS = 30 * 60 * 1000;
+const FX_CACHE_FILE = repoPath(".fx-cache.json");
+const DEFAULT_USD_IDR_TTL_MS = 24 * 60 * 60 * 1000;
 const SOL_USD_TTL_MS = 60 * 1000;
 
 let usdIdrCache = null;
 let solUsdCache = null;
+let diskCacheLoaded = false;
 
 function finite(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function loadDiskCache() {
+  if (diskCacheLoaded) return;
+  diskCacheLoaded = true;
+  try {
+    if (!fs.existsSync(FX_CACHE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(FX_CACHE_FILE, "utf8"));
+    const rate = finite(data?.usd_idr?.rate);
+    const nextUpdateMs = finite(data?.usd_idr?.next_update_ms);
+    const fetchedAt = finite(data?.usd_idr?.fetched_at);
+    if (rate && fetchedAt) {
+      usdIdrCache = {
+        rate,
+        at: fetchedAt,
+        nextUpdateMs: nextUpdateMs || fetchedAt + DEFAULT_USD_IDR_TTL_MS,
+      };
+    }
+  } catch (error) {
+    log("fx_warn", `FX cache read failed: ${error.message}`);
+  }
+}
+
+function saveDiskCache() {
+  try {
+    fs.writeFileSync(FX_CACHE_FILE, JSON.stringify({
+      usd_idr: usdIdrCache ? {
+        rate: usdIdrCache.rate,
+        fetched_at: usdIdrCache.at,
+        next_update_ms: usdIdrCache.nextUpdateMs,
+      } : null,
+    }, null, 2));
+  } catch (error) {
+    log("fx_warn", `FX cache write failed: ${error.message}`);
+  }
+}
+
+function usdIdrCacheValid(now) {
+  if (!usdIdrCache?.rate) return false;
+  const nextUpdateMs = finite(usdIdrCache.nextUpdateMs) || (Number(usdIdrCache.at) + DEFAULT_USD_IDR_TTL_MS);
+  return now < nextUpdateMs;
+}
+
 export async function getUsdIdrRate() {
+  loadDiskCache();
   const now = Date.now();
-  if (usdIdrCache && now - usdIdrCache.at < USD_IDR_TTL_MS) return usdIdrCache.rate;
+  if (usdIdrCacheValid(now)) return usdIdrCache.rate;
   try {
     const res = await fetch("https://open.er-api.com/v6/latest/USD");
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     const rate = finite(data?.rates?.IDR);
     if (!rate) throw new Error("IDR rate missing");
-    usdIdrCache = { rate, at: now };
+    const nextUpdateMs = finite(data?.time_next_update_unix)
+      ? Number(data.time_next_update_unix) * 1000
+      : now + DEFAULT_USD_IDR_TTL_MS;
+    usdIdrCache = { rate, at: now, nextUpdateMs };
+    saveDiskCache();
     return rate;
   } catch (error) {
     log("fx_warn", `USD/IDR fetch failed: ${error.message}`);

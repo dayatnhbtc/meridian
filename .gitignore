@@ -27,6 +27,7 @@ decision-log.json
 hivemind-cache.json
 signal-weights.json
 paper-positions.json
+.fx-cache.json
 
 # Logs
 logs/
