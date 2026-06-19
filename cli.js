@@ -206,6 +206,13 @@ Shows all closed position performance history with summary stats.
 Output: { summary: { total_positions_closed, total_pnl_usd, avg_pnl_pct, win_rate_pct, total_lessons }, count, positions: [...] }
 \`\`\`
 
+### meridian backfill-history [--execute] [--wallet <address>] [--limit N]
+Backfills lessons.json performance history from Meteora closed positions.
+Dry-run by default; --execute writes lessons.json after creating a backup.
+\`\`\`
+Output: { dry_run, backup, inserted, updated, manual_inserted, meridian_updated }
+\`\`\`
+
 ### meridian discord-signals [clear]
 Shows pending Discord signal queue from the discord-listener process.
 \`\`\`
@@ -257,6 +264,7 @@ const { values: flags } = parseArgs({
     "no-claim":   { type: "boolean" },
     "skip-swap":  { type: "boolean" },
     "dry-run":    { type: "boolean" },
+    execute:      { type: "boolean" },
     "silent":     { type: "boolean" },
     "min-usd":     { type: "string" },
     limit:        { type: "string" },
@@ -645,6 +653,19 @@ switch (subcommand) {
     const history = getPerformanceHistory({ hours: 999999, limit });
     const summary = getPerformanceSummary();
     out({ summary, ...history });
+    break;
+  }
+
+  // ── backfill-history ─────────────────────────────────────────────
+  case "backfill-history": {
+    const { backfillMeteoraHistory } = await import("./tools/history-backfill.js");
+    const limit = flags.limit == null ? null : Number(flags.limit);
+    if (limit != null && (!Number.isFinite(limit) || limit <= 0)) die("Usage: meridian backfill-history [--execute] [--wallet <address>] [--limit N]");
+    out(await backfillMeteoraHistory({
+      wallet: flags.wallet,
+      execute: Boolean(flags.execute),
+      limit,
+    }));
     break;
   }
 

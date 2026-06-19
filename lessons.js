@@ -91,6 +91,10 @@ function roundTo(value, digits = 2) {
   return Math.round(n * f) / f;
 }
 
+function learningPerformance(records = []) {
+  return records.filter((record) => record?.exclude_from_learning !== true && record?.source !== "wallet_manual");
+}
+
 // ─── Record Position Performance ──────────────────────────────
 
 /**
@@ -228,9 +232,10 @@ export async function recordPerformance(perf) {
   }
 
   // Evolve thresholds every 5 closed positions
-  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
+  const learnablePerformance = learningPerformance(data.performance);
+  if (learnablePerformance.length > 0 && learnablePerformance.length % MIN_EVOLVE_POSITIONS === 0) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
-    const result = evolveThresholds(data.performance, config);
+    const result = evolveThresholds(learnablePerformance, config);
     if (result?.changes && Object.keys(result.changes).length > 0) {
       reloadScreeningThresholds();
       log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
@@ -239,7 +244,7 @@ export async function recordPerformance(perf) {
     // Darwinian signal weight recalculation
     if (config.darwin?.enabled) {
       const { recalculateWeights } = await import("./signal-weights.js");
-      const wResult = recalculateWeights(data.performance, config);
+      const wResult = recalculateWeights(learnablePerformance, config);
       if (wResult.changes.length > 0) {
         log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
       }
@@ -388,6 +393,7 @@ function derivLesson(perf) {
  * @returns {{ changes: Object, rationale: Object } | null}
  */
 export function evolveThresholds(perfData, config) {
+  perfData = learningPerformance(perfData || []);
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
 
   const winners = perfData.filter((p) => p.pnl_pct > 0);
@@ -762,11 +768,17 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       pool: r.pool,
       strategy: r.strategy,
       pnl_usd: r.pnl_usd,
+      pnl_usd_pct: r.pnl_usd_pct,
+      pnl_sol: r.pnl_sol,
+      pnl_sol_pct: r.pnl_sol_pct,
       pnl_pct: r.pnl_pct,
       fees_earned_usd: r.fees_earned_usd,
+      fees_earned_sol: r.fees_earned_sol,
       range_efficiency: r.range_efficiency,
       minutes_held: r.minutes_held,
       close_reason: r.close_reason,
+      source: r.source || "meridian",
+      exclude_from_learning: r.exclude_from_learning === true,
       closed_at: r.recorded_at,
     }));
 
@@ -787,7 +799,7 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
  */
 export function getPerformanceSummary() {
   const data = load();
-  const p = data.performance;
+  const p = learningPerformance(data.performance);
 
   if (p.length === 0) return null;
 
