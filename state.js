@@ -569,7 +569,10 @@ export function getStateSummary() {
  * Returns { action, reason } or null if no exit needed.
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
-  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  const { pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  // Exits are SOL-denominated: always prefer pnl_sol_pct so a USD-driven pnl_pct
+  // (SOL price rising) can never mask a real SOL loss. Falls back to pnl_pct if absent.
+  const currentPnlPct = positionData.pnl_sol_pct ?? positionData.pnl_pct;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;

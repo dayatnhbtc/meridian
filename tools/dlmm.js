@@ -990,6 +990,8 @@ export async function getPositionPnl({ pool_address, position_address }) {
         return {
           pnl_usd: p.pnl_usd,
           pnl_pct: p.pnl_pct,
+          pnl_sol: p.pnl_sol,
+          pnl_sol_pct: p.pnl_sol_pct,
           current_value_usd: p.total_value_usd,
           unclaimed_fee_usd: p.unclaimed_fees_usd,
           all_time_fees_usd: p.collected_fees_usd,
@@ -1021,9 +1023,12 @@ export async function getPositionPnl({ pool_address, position_address }) {
       ? maybeNum(p.pnlSolPctChange)
       : maybeNum(p.pnlPctChange);
     const derivedPnlPct = deriveOpenPnlPct(p, solMode);
+    const solPnlPct = maybeNum(p.pnlSolPctChange) ?? deriveOpenPnlPct(p, true);
     return {
       pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
       pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
+      pnl_sol:           p.pnlSol != null ? roundNum(p.pnlSol, 4) : null,
+      pnl_sol_pct:       solPnlPct != null ? roundNum(solPnlPct, 2) : null,
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
       all_time_fees_usd: roundNum(solMode ? p.allTimeFees?.total?.sol : p.allTimeFees?.total?.usd, 4),
@@ -1284,6 +1289,17 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           : binData
             ? deriveOpenPnlPct(binData, config.management.solMode)
             : null;
+        // Always-SOL pct/value for exit math (independent of solMode reporting toggle).
+        const solPnlPct = lpData
+          ? (maybeNum(lpData.pnl?.percentNative) ?? deriveLpAgentPnlPct(lpData, true))
+          : binData
+            ? (maybeNum(binData.pnlSolPctChange) ?? deriveOpenPnlPct(binData, true))
+            : null;
+        const solPnlValue = lpData
+          ? (maybeNum(lpData.pnl?.valueNative) ?? null)
+          : binData
+            ? (maybeNum(binData.pnlSol) ?? null)
+            : null;
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
           : null;
@@ -1364,6 +1380,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           pnl_pct:            (lpData || binData)
             ? Math.round(reportedPnlPct * 100) / 100
             : null,
+          pnl_sol:            solPnlValue != null ? Math.round(solPnlValue * 10000) / 10000 : null,
+          pnl_sol_pct:        solPnlPct != null ? Math.round(solPnlPct * 100) / 100 : null,
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
           pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
           pnl_pct_suspicious: !!pnlPctSuspicious,

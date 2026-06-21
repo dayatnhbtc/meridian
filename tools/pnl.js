@@ -270,6 +270,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     collected_fees_true_usd: round(claimedUsd),
     pnl_usd:            round(solMode ? pnlSol : pnlUsd),
     pnl_true_usd:       round(pnlUsd),
+    pnl_sol:            round(pnlSol),
+    pnl_sol_pct:        round(pctSol, 2),
     pnl_pct:            round(ourPct, 2),
     pnl_pct_derived:    round(ourPct, 2),
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,

@@ -141,7 +141,7 @@ function schedulePeakConfirmation(positionAddress) {
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       const position = result?.positions?.find((p) => p.position === positionAddress);
-      resolvePendingPeak(positionAddress, position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
+      resolvePendingPeak(positionAddress, position?.pnl_sol_pct ?? position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
     } catch (error) {
       log("state_warn", `Peak confirmation failed for ${positionAddress}: ${error.message}`);
     }
@@ -160,7 +160,7 @@ function scheduleTrailingDropConfirmation(positionAddress) {
       const position = result?.positions?.find((p) => p.position === positionAddress);
       const resolved = resolvePendingTrailingDrop(
         positionAddress,
-        position?.pnl_pct ?? null,
+        position?.pnl_sol_pct ?? position?.pnl_pct ?? null,
         config.management.trailingDropPct,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
@@ -186,7 +186,7 @@ function scheduleTakeProfitConfirmation(positionAddress) {
       const position = result?.positions?.find((p) => p.position === positionAddress);
       const resolved = resolvePendingTakeProfit(
         positionAddress,
-        position?.pnl_pct ?? null,
+        position?.pnl_sol_pct ?? position?.pnl_pct ?? null,
         HARD_TP_CONFIRM_TOLERANCE,
       );
       if (resolved?.confirmed) {
@@ -300,7 +300,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     for (const p of positionData) {
       if (
         !p.pnl_pct_suspicious &&
-        queuePeakConfirmation(p.position, p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
+        queuePeakConfirmation(p.position, p.pnl_sol_pct ?? p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
         shouldUsePnlRecheck()
       ) {
         schedulePeakConfirmation(p.position);
@@ -1066,7 +1066,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
       for (const p of result.positions) {
         if (
           !p.pnl_pct_suspicious &&
-          queuePeakConfirmation(p.position, p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
+          queuePeakConfirmation(p.position, p.pnl_sol_pct ?? p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
           shouldUsePnlRecheck()
         ) {
           schedulePeakConfirmation(p.position);
@@ -1203,20 +1203,23 @@ function getSevereOorFastCloseWaitMinutes(managementConfig) {
 
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
+  // SOL-denominated pct drives SL/TP so a USD-inflated pnl_pct can't trigger a
+  // false take-profit (or suppress a real stop-loss) when SOL price moves.
+  const exitPnlPct = position.pnl_sol_pct ?? position.pnl_pct;
   const pnlSuspect = (() => {
     // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
     if (position.pnl_pct_suspicious) return true;
-    if (position.pnl_pct == null) return false;
-    if (position.pnl_pct > -90) return false;
+    if (exitPnlPct == null) return false;
+    if (exitPnlPct > -90) return false;
     if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
-      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
+      log("cron_warn", `Suspect PnL for ${position.pair}: ${exitPnlPct}% but position still has value — skipping PnL rules`);
       return true;
     }
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: formatCloseReason("SL", `PnL ${Number(position.pnl_pct).toFixed(2)}% <= stopLossPct ${managementConfig.stopLossPct}%`) };
+  if (!pnlSuspect && exitPnlPct != null && exitPnlPct <= managementConfig.stopLossPct) {
+    return { action: "CLOSE", rule: 1, reason: formatCloseReason("SL", `PnL ${Number(exitPnlPct).toFixed(2)}% <= stopLossPct ${managementConfig.stopLossPct}%`) };
   }
   const confirmedTakeProfitReason = !pnlSuspect ? consumeConfirmedTakeProfit(position.position) : null;
   if (confirmedTakeProfitReason) {
@@ -1226,10 +1229,10 @@ function getDeterministicCloseRule(position, managementConfig) {
   const strategyName = position.strategy || tracked?.strategy;
   const strategyTakeProfitPct = hardTakeProfitEnabled ? getTakeProfitPctForLpStrategy(strategyName) : null;
   const takeProfitPct = strategyTakeProfitPct ?? managementConfig.takeProfitPct;
-  if (hardTakeProfitEnabled && !pnlSuspect && position.pnl_pct != null && position.pnl_pct >= takeProfitPct) {
+  if (hardTakeProfitEnabled && !pnlSuspect && exitPnlPct != null && exitPnlPct >= takeProfitPct) {
     const strategyLabel = strategyName ? ` (${strategyName})` : "";
-    const reason = formatCloseReason("TP", `PnL ${Number(position.pnl_pct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`);
-    return { action: "CLOSE", rule: 2, reason, needs_confirmation: shouldUsePnlRecheck(), take_profit_pnl_pct: Number(position.pnl_pct) };
+    const reason = formatCloseReason("TP", `PnL ${Number(exitPnlPct).toFixed(2)}% >= takeProfitPct ${takeProfitPct}%${strategyLabel}`);
+    return { action: "CLOSE", rule: 2, reason, needs_confirmation: shouldUsePnlRecheck(), take_profit_pnl_pct: Number(exitPnlPct) };
   }
   if (
     position.active_bin != null &&
