@@ -405,9 +405,12 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
+      loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
+      autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
+      autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
@@ -425,6 +428,18 @@ const toolMap = {
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      // pnl poller
+      pnlConfirmTicks: ["pnl", "confirmTicks"],
+      // opportunity poller (interval/enabled changes apply on next restart)
+      opportunityPollEnabled: ["opportunity", "enabled"],
+      opportunityPollIntervalSec: ["opportunity", "pollIntervalSec"],
+      opportunityPollLimit: ["opportunity", "limit"],
+      opportunityMinScore: ["opportunity", "minScore"],
+      opportunitySmartWalletBonus: ["opportunity", "smartWalletScoreBonus"],
+      degenTargetVolRatio: ["opportunity", "targetVolRatio"],
+      degenTargetLpCount: ["opportunity", "targetLpCount"],
+      degenTargetFeeRatio: ["opportunity", "targetFeeRatio"],
+      degenTargetLiquidity: ["opportunity", "targetLiquidity"],
       solMode: ["management", "solMode"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
@@ -749,6 +764,40 @@ async function autoSwapCloseProceedsToSol({ result, args, preBalances }) {
 }
 
 /**
+ * Swap a base token back to SOL with retry. Jupiter can transiently fail (no route,
+ * quote error) and a single attempt silently leaves the token unsold — this retries
+ * with a delay, re-fetching the balance each attempt (amounts can shift on partial
+ * fills). Treats both a throw AND result.success===false / missing tx as failure.
+ * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
+ */
+async function swapBaseToSolWithRetry(baseMint, label) {
+  const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
+  const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+  let lastErr = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const balances = await getWalletBalances({});
+      const token = balances.tokens?.find((t) => t.mint === baseMint);
+      if (!token || token.usd < 0.10) {
+        // Nothing left to swap (already sold or dust) — treat as done.
+        return { swapped: attempt > 1, result: null, token: null };
+      }
+      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
+      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+      const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
+      if (ok) return { swapped: true, result: swapResult, token };
+      lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
+    } catch (e) {
+      lastErr = e.message;
+    }
+    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${attempts} failed: ${lastErr}`);
+    if (attempt < attempts) await sleep(delayMs);
+  }
+  log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
+  return { swapped: false, result: null, token: null };
+}
+
+/**
  * Execute a tool call with safety checks and logging.
  */
 export async function executeTool(name, args) {
@@ -811,16 +860,7 @@ export async function executeTool(name, args) {
         // Auto-swap close proceeds back to SOL unless user explicitly asked to hold.
         await autoSwapCloseProceedsToSol({ result, args, preBalances: preCloseBalances });
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
-        try {
-          const balances = await getWalletBalances({});
-          const token = balances.tokens?.find(t => t.mint === result.base_mint);
-          if (token && token.usd >= 0.10) {
-            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-          }
-        } catch (e) {
-          log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
-        }
+        await swapBaseToSolWithRetry(result.base_mint, "after claim");
       }
     }
 
