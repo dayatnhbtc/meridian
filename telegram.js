@@ -3,6 +3,7 @@ import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { getTrackedPosition } from "./state.js";
 import { config } from "./config.js";
+import { getIdrPerSol } from "./tools/fx.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const OFFSET_PATH = repoPath(".telegram-offset");
@@ -671,15 +672,26 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlUsdPct, pnlSolPct, 
   const primaryValue = solMode ? netSol : netUsdRaw;
   const icon = primaryValue >= 0 ? "🟢" : "🔴";
 
+  // IDR estimate (append, never replace existing USD/SOL refs)
+  const solUsdHint = netSol ? Math.abs(netUsdRaw / netSol) : null;
+  const idrPerSol = await getIdrPerSol({ solUsd: solUsdHint }).catch(() => null);
+  const rate = Number(idrPerSol);
+  const idrFromSol = (sol) => {
+    const s = Number(sol);
+    if (!Number.isFinite(s) || !Number.isFinite(rate) || rate <= 0) return "";
+    const v = s * rate;
+    return ` (${v >= 0 ? "+" : "-"}Rp${Math.round(Math.abs(v)).toLocaleString("id-ID")})`;
+  };
+
   const lines = [
     `${icon} <b>CLOSED</b> | ${escapeHtml(pair)}`,
   ];
   if (solMode) {
-    lines.push(`Closed PnL: ◎${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}`);
+    lines.push(`Closed PnL: ◎${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}${idrFromSol(netSol)}`);
     lines.push(`USD ref: ${usdSign}$${(pnlUsd ?? 0).toFixed(2)} (${usdSign}${(pnlUsdPct ?? 0).toFixed(2)}%) ${usdLabel}`);
   } else {
     lines.push(`Closed PnL: ${usdSign}$${(pnlUsd ?? 0).toFixed(2)} (${usdSign}${(pnlUsdPct ?? 0).toFixed(2)}%) ${usdLabel}`);
-    lines.push(`SOL ref: ◎${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}`);
+    lines.push(`SOL ref: ◎${solSign}${netSol.toFixed(4)} (${solSign}${(pnlSolPct ?? 0).toFixed(2)}%) ${solLabel}${idrFromSol(netSol)}`);
     lines.push(`💰 Net : ${netTotalSign}$${netUsdTotal.toFixed(2)} ${netTotalLabel}`);
   }
   // Fees if any

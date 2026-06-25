@@ -93,6 +93,18 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  // Single-side SOL deploys spend the quote (token_y) side. A non-SOL quote (USDC, etc.)
+  // makes the on-chain sim fail with "insufficient funds" (0x1). Reject before simulating.
+  const quoteMint = detail?.token_y?.address || detail?.quote_token_address || null;
+  const quoteSymbol = String(detail?.token_y?.symbol || "").trim().toUpperCase();
+  const quoteIsSol = quoteMint === config.tokens.SOL || quoteSymbol === "SOL" || quoteSymbol === "WSOL";
+  if (!quoteIsSol) {
+    return {
+      pass: false,
+      reason: `Pool quote token ${detail?.token_y?.symbol || quoteMint || "unknown"} is not SOL — this agent only deploys single-side SOL into SOL-quoted pools.`,
+    };
+  }
+
   const tvl = poolDetailTvl(detail);
   const minTvl = numberOrNull(config.screening.minTvl);
   const maxTvl = numberOrNull(config.screening.maxTvl);

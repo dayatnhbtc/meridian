@@ -3,6 +3,7 @@ import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
 import { config } from "./config.js";
 import { repoPath } from "./repo-root.js";
+import { getUsdIdrRate } from "./tools/fx.js";
 
 const STATE_FILE = repoPath("state.json");
 const LESSONS_FILE = repoPath("lessons.json");
@@ -49,16 +50,17 @@ export async function generateBriefing() {
     .slice(0, 3);
   const perfSummary = getPerformanceSummary();
   const pnlIcon = totalPnLUsd > 0 ? "🟢" : totalPnLUsd < 0 ? "🔴" : "⚪";
+  const usdIdrRate = await getUsdIdrRate().catch(() => null);
 
   const lines = [
     `☀️ <b>Morning Briefing</b>` ,
     `${todayWib} WIB · last 24h`,
     "",
     `<b>📊 Performance</b>`,
-    `${pnlIcon} Net PnL: <b>${signedUsd(totalPnLUsd)}</b>` ,
+    `${pnlIcon} Net PnL: <b>${signedUsd(totalPnLUsd)}</b>${signedIdr(totalPnLUsd, usdIdrRate)}` ,
     `💵 Fees: $${totalFeesUsd.toFixed(2)}`,
     `🎯 Win rate: ${perfLast24h.length ? `${Math.round((wins24h / perfLast24h.length) * 100)}% (${wins24h}/${perfLast24h.length})` : "N/A"}`,
-    `⏱ Avg hold: ${avgHoldMin == null ? "N/A" : formatDuration(avgHoldMin)}`,
+    `⌛ Avg hold: ${avgHoldMin == null ? "N/A" : formatDuration(avgHoldMin)}`,
     `📍 Avg in-range: ${avgRangeEff == null ? "N/A" : `${Math.round(avgRangeEff)}%`}`,
     "",
     `<b>💼 Activity</b>`,
@@ -160,6 +162,14 @@ function signedUsd(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "$?";
   return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
+}
+
+function signedIdr(usdValue, usdIdrRate) {
+  const usd = Number(usdValue);
+  const rate = Number(usdIdrRate);
+  if (!Number.isFinite(usd) || !Number.isFinite(rate) || rate <= 0) return "";
+  const value = usd * rate;
+  return ` (${value >= 0 ? "+" : "-"}Rp${Math.round(Math.abs(value)).toLocaleString("id-ID")})`;
 }
 
 function signedPct(value) {

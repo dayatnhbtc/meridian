@@ -80,6 +80,12 @@ function isUsableVolatility(value) {
   return Number.isFinite(n) && n > 0;
 }
 
+function isSolMint(mint, symbol) {
+  if (mint && String(mint) === config.tokens.SOL) return true;
+  const sym = String(symbol || "").trim().toUpperCase();
+  return sym === "SOL" || sym === "WSOL";
+}
+
 function classifyActivityTrend(pool) {
   const volumeChange = numeric(pool?.volume_change_pct);
   const feeChange = numeric(pool?.fee_change_pct);
@@ -293,6 +299,13 @@ export function getRawPoolScreeningRejectReason(pool, s) {
   if (pool?.quote_token_has_critical_warnings === true) return "quote token has critical warnings";
   if (pool?.base_token_has_high_single_ownership === true) return "base token has high single ownership";
   if (pool?.pool_type && pool.pool_type !== "dlmm") return `pool_type ${pool.pool_type} is not dlmm`;
+
+  // This agent only does single-side SOL deposits into the quote (token_y) side.
+  // A non-SOL quote (e.g. USDC) would make the deploy try to spend a token we don't
+  // hold, so the on-chain sim fails with "insufficient funds" (0x1). Reject early.
+  if (!isSolMint(quote?.address, quote?.symbol)) {
+    return `quote token ${quote?.symbol || quote?.address || "unknown"} is not SOL — agent only deploys single-side SOL into SOL-quoted pools`;
+  }
 
   if (mcap == null || mcap < s.minMcap) return `mcap ${mcap ?? "unknown"} below minMcap ${s.minMcap}`;
   if (mcap > s.maxMcap) return `mcap ${mcap} above maxMcap ${s.maxMcap}`;

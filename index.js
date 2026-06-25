@@ -403,6 +403,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       idrPerSol,
       maxPositions: config.risk.maxPositions,
       actionSummary,
+      trailing: config.management.trailingTakeProfit
+        ? { enabled: true, triggerPct: config.management.trailingTriggerPct, dropPct: config.management.trailingDropPct }
+        : null,
     });
 
     // ── Call LLM only if action needed ──────────────────────────────

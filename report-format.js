@@ -128,6 +128,12 @@ export function formatPositionLine(position, action = {}, options = {}) {
     `Val: ${money(position.total_value_usd, valueOpts)}  PnL: ${signedMoney(pnlValue, valueOpts)} (${signedPct(openPnlPct(position))})`,
     `Fees: ${money(position.unclaimed_fees_usd, valueOpts)}  Yield: ${pct(position.fee_per_tvl_24h)}  Age: ${formatAge(position.age_minutes)}`,
   ];
+  const tr = options.trailing;
+  if (tr?.enabled) {
+    lines.push(position.trailing_active
+      ? `Trail: 🟢 active — exits on −${tr.dropPct}% from peak ${signedPct(position.peak_pnl_pct)}`
+      : `Trail: ⚪ off — arms at +${tr.triggerPct}% (peak ${signedPct(position.peak_pnl_pct)})`);
+  }
   const bar = rangeBar(position);
   if (bar) lines.push(`<pre>${escapeHtml(bar)}</pre>`);
   if (position.instruction) lines.push(`Note: "${escapeHtml(position.instruction)}"`);
@@ -162,7 +168,7 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
   const closeCount = actions.filter((a) => a.action === "CLOSE").length;
   const claimCount = actions.filter((a) => a.action === "CLAIM").length;
   const instructionCount = actions.filter((a) => a.action === "INSTRUCTION").length;
-  const body = positions.map((p, i) => formatPositionLine(p, actionFor(p, i), { solMode })).join("\n\n");
+  const body = positions.map((p, i) => formatPositionLine(p, actionFor(p, i), { solMode, trailing: options.trailing })).join("\n\n");
   const actionSummary = options.actionSummary || "no action";
   const slots = options.maxPositions ? `${positions.length}/${options.maxPositions}` : String(positions.length);
   const valueOpts = { solMode, digits: solMode ? 4 : 2 };
@@ -177,7 +183,9 @@ export function formatPortfolioReport(positions = [], actionMap = new Map(), opt
     `<b>${escapeHtml(title)}</b>`,
     `Positions: ${slots}  Range: ${inRangeCount}/${positions.length} IN${avgRangePosition == null ? "" : ` (avg ${avgRangePosition}%)`}`,
     `Actions: ${actionBits}`,
-    `Value: ${money(totalValue, valueOpts)}  PnL: ${signedMoney(totalPnl, valueOpts)}${solMode ? signedIdrFromSol(totalPnl, idrPerSol) : ""}  Fees: ${money(totalFees, valueOpts)}`,
+    `Value: ${money(totalValue, valueOpts)}`,
+    `PnL: ${signedMoney(totalPnl, valueOpts)}${solMode ? signedIdrFromSol(totalPnl, idrPerSol) : ""}`,
+    `Fees: ${money(totalFees, valueOpts)}`,
     "",
     body,
     "",
@@ -333,18 +341,21 @@ export function formatDailyPnlReport({ dateLabel, realizedPositions = [], openPo
       const bt = new Date(b?.closed_at || b?.recorded_at || 0).getTime();
       return bt - at;
     });
-    for (const p of latestRealized.slice(0, 8)) {
+    for (const p of latestRealized.slice(0, 15)) {
       const solValue = solMode ? realizedSolValue(p) : null;
       const value = solValue ?? Number(p.pnl_usd);
       const opts = solValue != null ? valueOpts : usdOpts;
       const pctValue = solValue != null ? realizedSolPct(p) : p.pnl_pct;
       lines.push(`${pnlEmoji(value)} ${escapeHtml(p.pool_name || p.pair || p.pool || "Unknown")}  <b>${signedMoney(value, opts)}</b>  ${signedPct(pctValue)}`);
     }
+    if (latestRealized.length > 15) {
+      lines.push(`… ${latestRealized.length - 15} more closed not shown (included in Realized total above)`);
+    }
   }
 
   if (openPositions.length) {
     lines.push("", "📗 <b>Open now</b>");
-    for (const p of openPositions.slice(0, 8)) {
+    for (const p of openPositions.slice(0, 15)) {
       const pnlValue = openPnlValue(p, { solMode });
       lines.push(`${pnlEmoji(pnlValue)} ${escapeHtml(p.pair || p.pool || "Unknown")}  <b>${signedMoney(pnlValue, valueOpts)}</b>  ${signedPct(openPnlPct(p))}`);
     }

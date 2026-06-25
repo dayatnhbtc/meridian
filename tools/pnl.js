@@ -280,6 +280,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
+    trailing_active:    !!tracked?.trailing_active,
+    peak_pnl_pct:       tracked?.peak_pnl_pct ?? null,
   };
 }
 
